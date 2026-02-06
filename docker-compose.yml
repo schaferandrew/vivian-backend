@@ -21,7 +21,8 @@ services:
       - ./tmp:/tmp/vivian-uploads
     networks:
       - vivian-network
-    restart: unless-stopped
+    restart: no
+    stop_grace_period: 30s
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
