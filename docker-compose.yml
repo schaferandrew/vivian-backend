@@ -1,0 +1,30 @@
+# Backend only. One API instance; clients (vivian-client, other devices) run separately
+# and connect to this API. For local dev with a client, run the client from its own repo.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - apps/api/.env
+    environment:
+      - VIVIAN_MCP_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - VIVIAN_MCP_GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - VIVIAN_MCP_GOOGLE_REFRESH_TOKEN=${GOOGLE_REFRESH_TOKEN}
+      - VIVIAN_MCP_DRIVE_ROOT_FOLDER_ID=${DRIVE_ROOT_FOLDER_ID}
+      - VIVIAN_MCP_SHEETS_SPREADSHEET_ID=${SHEETS_SPREADSHEET_ID}
+      - VIVIAN_API_OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    volumes:
+      # Writable by container user (UID 1000); ensure host ./tmp is owned by 1000 or world-writable
+      - ./tmp:/tmp/vivian-uploads
+    networks:
+      - vivian-network
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  vivian-network:
+    driver: bridge
