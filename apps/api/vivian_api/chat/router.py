@@ -9,7 +9,7 @@ from vivian_api.chat.session import session_manager
 from vivian_api.chat.handler import chat_handler
 from vivian_api.chat.message_protocol import ChatMessage
 from vivian_api.chat.personality import VivianPersonality
-from vivian_api.services.llm import get_chat_completion
+from vivian_api.services.llm import get_chat_completion, OpenRouterCreditsError, OpenRouterRateLimitError
 from vivian_api.config import AVAILABLE_MODELS, DEFAULT_MODEL, Settings, check_ollama_status, get_selected_model, set_selected_model
 
 
@@ -51,7 +51,8 @@ async def list_models():
             "id": model["id"],
             "name": model["name"],
             "provider": model["provider"],
-            "selectable": True if model["provider"] != "Ollama" else ollama_status.get("available", False)
+            "selectable": True if model["provider"] != "Ollama" else ollama_status.get("available", False),
+            "free": model.get("free", False)
         }
         models_with_status.append(model_info)
     
@@ -149,11 +150,28 @@ async def chat_message(request: ChatRequest):
     ]
     
     # Get response from OpenRouter
-    response_text = await get_chat_completion(messages)
-    
+    try:
+        response_text = await get_chat_completion(messages)
+    except OpenRouterCreditsError as e:
+        # Handle model not found (404) errors vs insufficient credits (402) errors
+        if "Model error" in e.message:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "model_not_found", "message": e.message},
+            )
+        return JSONResponse(
+            status_code=402,
+            content={"error": "insufficient_credits", "message": e.message},
+        )
+    except OpenRouterRateLimitError as e:
+        return JSONResponse(
+            status_code=429,
+            content={"error": "rate_limit", "message": e.message},
+        )
+
     # Store assistant response
     session.add_message(role="assistant", content=response_text)
-    
+
     return ChatResponse(
         response=response_text,
         session_id=session.session_id
@@ -184,7 +202,25 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 # Handle the message
                 await chat_handler.handle_message(session, message)
-                
+
+            except OpenRouterCreditsError as e:
+                await connection_manager.send_error(
+                    session,
+                    error_id="insufficient_credits",
+                    category="system_error",
+                    severity="user_fixable",
+                    message=e.message,
+                    recovery_options=[{"id": "retry", "label": "Try again"}],
+                )
+            except OpenRouterRateLimitError as e:
+                await connection_manager.send_error(
+                    session,
+                    error_id="rate_limit",
+                    category="system_error",
+                    severity="user_fixable",
+                    message=e.message,
+                    recovery_options=[{"id": "retry", "label": "Try again"}],
+                )
             except Exception as e:
                 print(f"Error handling message: {e}")
                 import traceback

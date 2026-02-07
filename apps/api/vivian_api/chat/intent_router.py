@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Any
 from pydantic import BaseModel, Field
 
 from vivian_api.services.receipt_parser import OpenRouterService
+from vivian_api.services.llm import OpenRouterCreditsError
 
 
 class IntentCategory(str, Enum):
@@ -166,6 +167,16 @@ class IntentRouter:
                     "temperature": 0.1
                 }
             )
+            if response.status_code == 402:
+                try:
+                    body = response.json()
+                    msg = (
+                        (body.get("error") or {}).get("message")
+                        or "Your account or API key has insufficient credits. Add more credits and retry."
+                    )
+                except Exception:
+                    msg = "Your account or API key has insufficient credits. Add more credits and retry."
+                raise OpenRouterCreditsError(msg)
             response.raise_for_status()
             data = response.json()
             
@@ -188,6 +199,8 @@ class IntentRouter:
                         suggested_flow=result.get("suggested_flow")
                     )
                     
+        except OpenRouterCreditsError:
+            raise
         except Exception as e:
             print(f"LLM classification failed: {e}")
         

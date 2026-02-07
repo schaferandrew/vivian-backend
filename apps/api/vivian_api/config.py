@@ -7,16 +7,21 @@ from pydantic_settings import BaseSettings
 
 
 AVAILABLE_MODELS = [
-    {"id": "gpt-3.5-turbo", "name": "GPT-3.5 Turbo", "provider": "OpenAI"},
-    {"id": "gpt-4", "name": "GPT-4", "provider": "OpenAI"},
-    {"id": "claude-3-haiku-20240307", "name": "Claude 3 Haiku", "provider": "Anthropic"},
-    {"id": "google/gemini-flash-1.5", "name": "Gemini Flash 1.5", "provider": "Google"},
-    {"id": "ollama/llama3.1:8b", "name": "Llama 3.1 8B", "provider": "Ollama"},
-    {"id": "ollama/llama3.2:3b", "name": "Llama 3.2 3B", "provider": "Ollama"},
-    {"id": "ollama/mistral:7b-instruct", "name": "Mistral 7B Instruct", "provider": "Ollama"},
+    {"id": "mistralai/devstral-2", "name": "Devstral 2", "provider": "Mistral"},
+    {"id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "Google"},
+    {"id": "openai/gpt-4-turbo", "name": "GPT-4 Turbo", "provider": "OpenAI"},
+    {"id": "google/gemini-3-flash-preview", "name": "Gemini 3 Flash Preview", "provider": "Google"},
+    {"id": "meta-llama/llama-3.3-70b-instruct:free", "name": "Llama 3.3 70B Instruct", "provider": "OpenRouter", "free": True},
+    {"id": "z-ai/glm-4.5-air:free", "name": "GLM-4.5 Air", "provider": "OpenRouter", "free": True},
+    {"id": "nvidia/nemotron-3-nano-30b-a3b:free", "name": "Nemotron 3 Nano 30B A3B", "provider": "OpenRouter", "free": True},
+    {"id": "deepseek/deepseek-r1-0528:free", "name": "DeepSeek R1 0528", "provider": "OpenRouter", "free": True},
+    {"id": "arcee-ai/trinity-mini:free", "name": "Trinity Mini", "provider": "OpenRouter", "free": True},
+    {"id": "openrouter/free", "name": "OpenRouter Free (Auto)", "provider": "OpenRouter", "free": True},
+    {"id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet", "provider": "Anthropic"},
+    {"id": "mistralai/mistral-large-latest", "name": "Mistral Large (Latest)", "provider": "Mistral"},
 ]
 
-DEFAULT_MODEL = "gpt-3.5-turbo"
+DEFAULT_MODEL = "google/gemini-3-flash-preview"
 
 # Global state for runtime model selection
 _global_state = {

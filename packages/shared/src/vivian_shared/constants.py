@@ -14,7 +14,7 @@ TEMP_UPLOAD_DIR = Path("/tmp/vivian-uploads")
 CONFIDENCE_THRESHOLD = 0.85
 
 # OpenRouter model for receipt parsing
-DEFAULT_RECEIPT_MODEL = "anthropic/claude-3.5-sonnet-20240620"  # or "google/gemini-flash-1.5"
+DEFAULT_RECEIPT_MODEL = "anthropic/claude-3.5-sonnet-20240620"  # or "google/gemini-3-flash-preview"
 
 # Ledger sheet name
 LEDGER_SHEET_NAME = "HSA_Ledger"

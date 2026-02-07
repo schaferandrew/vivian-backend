@@ -19,6 +19,8 @@ services:
     volumes:
       # Writable by container user (UID 1000); ensure host ./tmp is owned by 1000 or world-writable
       - ./tmp:/tmp/vivian-uploads
+      # Mount API code so edits on host are used without rebuilding (uvicorn reload picks up changes)
+      - ./apps/api:/app
     networks:
       - vivian-network
     restart: no
