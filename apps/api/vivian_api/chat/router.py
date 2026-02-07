@@ -10,7 +10,7 @@ from vivian_api.chat.handler import chat_handler
 from vivian_api.chat.message_protocol import ChatMessage
 from vivian_api.chat.personality import VivianPersonality
 from vivian_api.services.llm import get_chat_completion
-from vivian_api.config import AVAILABLE_MODELS, DEFAULT_MODEL, Settings, check_ollama_status
+from vivian_api.config import AVAILABLE_MODELS, DEFAULT_MODEL, Settings, check_ollama_status, get_selected_model, set_selected_model
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -58,7 +58,7 @@ async def list_models():
     return {
         "models": models_with_status,
         "providers": providers,
-        "current_model": settings.selected_model,
+        "current_model": get_selected_model(),
         "default_model": DEFAULT_MODEL
     }
 
@@ -82,8 +82,8 @@ async def select_model(request: ModelSelectRequest):
             detail="Ollama is not running. Please start Ollama to use this model."
         )
     
-    settings.selected_model = request.model_id
-    return {"success": True, "selected_model": settings.selected_model}
+    set_selected_model(request.model_id)
+    return {"success": True, "selected_model": get_selected_model()}
 
 
 @router.post("/sessions")
