@@ -106,7 +106,7 @@ class ChatSession(BaseModel):
     last_activity_at: datetime = Field(default_factory=datetime.utcnow)
     
     # Connection (excluded from serialization)
-    websocket: Optional[Any] = Field(None, exclude=True)
+    websocket: Optional[Any] = Field(default=None, exclude=True)
     
     # Conversation history (full history preserved)
     messages: List[Dict[str, Any]] = Field(default_factory=list)
@@ -217,9 +217,20 @@ class SessionManager:
         self._sessions: Dict[str, ChatSession] = {}
         self._websocket_map: Dict[WebSocket, str] = {}
     
-    def create_session(self) -> ChatSession:
+    def create_session(self, session_id: Optional[str] = None) -> ChatSession:
         """Create a new chat session."""
-        session = ChatSession()
+        if session_id and session_id in self._sessions:
+            return self._sessions[session_id]
+        
+        if session_id:
+            session = ChatSession(
+                session_id=session_id,
+                websocket=None,
+                messages=[],
+            )
+        else:
+            session = ChatSession()
+        
         self._sessions[session.session_id] = session
         return session
     

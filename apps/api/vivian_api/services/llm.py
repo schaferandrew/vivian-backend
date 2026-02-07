@@ -1,7 +1,15 @@
 """LLM service for OpenRouter and Ollama integration."""
 
 import httpx
-from vivian_api.config import Settings, get_selected_model
+from vivian_api.config import Settings, get_selected_model, AVAILABLE_MODELS
+
+
+def _is_ollama_model(model_id: str) -> bool:
+    """Check if a model ID corresponds to an Ollama model."""
+    for model in AVAILABLE_MODELS:
+        if model["id"] == model_id:
+            return model.get("provider") == "Ollama"
+    return False
 
 
 class OpenRouterCreditsError(Exception):
@@ -33,7 +41,7 @@ async def get_chat_completion(messages: list[dict], web_search_enabled: bool = F
     """
     model = get_selected_model()
     
-    if model.startswith("ollama/"):
+    if _is_ollama_model(model):
         return await _get_ollama_completion(messages, model)
     else:
         return await _get_openrouter_completion(messages, model, web_search_enabled)
@@ -115,6 +123,7 @@ async def _get_openrouter_completion(messages: list[dict], model: str, web_searc
 async def _get_ollama_completion(messages: list[dict], model: str) -> str:
     """Get chat completion from Ollama local API."""
     ollama_url = Settings.get_ollama_base_url()
+    # Strip "ollama/" prefix if present
     ollama_model = model.replace("ollama/", "")
     
     payload = {

@@ -22,8 +22,41 @@ AVAILABLE_MODELS = [
     {"id": "mistralai/mistral-large-latest", "name": "Mistral Large (Latest)", "provider": "OpenRouter"},
     {"id": "mistralai/devstral-2", "name": "Devstral 2", "provider": "OpenRouter"},
     # Ollama models (local, not via OpenRouter)
-    {"id": "ollama/llama3.2", "name": "Llama 3.2 (Local)", "provider": "Ollama"},
-    {"id": "ollama/mistral", "name": "Mistral (Local)", "provider": "Ollama"},
+    {
+        "id": "qwen2.5-coder:3b",
+        "name": "Qwen2.5 Coder 3B",
+        "provider": "Ollama"
+    },
+    {
+        "id": "mistral:7b-instruct",
+        "name": "Mistral 7B Instruct",
+        "provider": "Ollama"
+    },
+    {
+        "id": "mistral:7b",
+        "name": "Mistral 7B",
+        "provider": "Ollama"
+    },
+    {
+        "id": "llama3.1:8b",
+        "name": "Llama 3.1 8B",
+        "provider": "Ollama"
+    },
+    {
+        "id": "llama3.2:3b",
+        "name": "Llama 3.2 3B",
+        "provider": "Ollama"
+    },
+    {
+        "id": "qwen2.5:1.5b",
+        "name": "Qwen 2.5 1.5B",
+        "provider": "Ollama"
+    },
+    {
+        "id": "deepseek-coder:1.3b",
+        "name": "DeepSeek Coder 1.3B",
+        "provider": "Ollama"
+    }
 ]
 
 DEFAULT_MODEL = "google/gemini-3-flash-preview"
