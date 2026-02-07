@@ -20,12 +20,13 @@ class OpenRouterRateLimitError(Exception):
         super().__init__(message)
 
 
-async def get_chat_completion(messages: list[dict]) -> str:
+async def get_chat_completion(messages: list[dict], web_search_enabled: bool = False) -> str:
     """
     Get chat completion from either OpenRouter or Ollama.
     
     Args:
         messages: List of message dicts with 'role' and 'content' keys
+        web_search_enabled: Whether to enable web search (~$0.02/query)
         
     Returns:
         Response text from the LLM
@@ -35,28 +36,31 @@ async def get_chat_completion(messages: list[dict]) -> str:
     if model.startswith("ollama/"):
         return await _get_ollama_completion(messages, model)
     else:
-        return await _get_openrouter_completion(messages, model)
+        return await _get_openrouter_completion(messages, model, web_search_enabled)
 
 
-async def _get_openrouter_completion(messages: list[dict], model: str) -> str:
+async def _get_openrouter_completion(messages: list[dict], model: str, web_search_enabled: bool = False) -> str:
     """Get chat completion from OpenRouter API."""
     settings = Settings()
-    
+
     headers = {
         "Authorization": f"Bearer {settings.openrouter_api_key}",
         "Content-Type": "application/json",
         "HTTP-Referer": "http://localhost:3000",
         "X-Title": "Vivian Chat",
     }
-    
+
     payload = {
         "model": model,
         "messages": messages,
+        "plugins": [{"id": "web"}] if web_search_enabled else [{"id": "web", "enabled": False}],
     }
-    
+
     async with httpx.AsyncClient() as client:
         print(f"OpenRouter URL: {settings.openrouter_base_url}/chat/completions")
         print(f"Model: {model}")
+        print(f"Plugins: {payload['plugins']}")
+        print(f"Web search enabled: {web_search_enabled}")
         print(f"API Key (first 10 chars): {settings.openrouter_api_key[:10]}...")
         
         response = await client.post(

@@ -7,18 +7,23 @@ from pydantic_settings import BaseSettings
 
 
 AVAILABLE_MODELS = [
-    {"id": "mistralai/devstral-2", "name": "Devstral 2", "provider": "Mistral"},
-    {"id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "Google"},
-    {"id": "openai/gpt-4-turbo", "name": "GPT-4 Turbo", "provider": "OpenAI"},
-    {"id": "google/gemini-3-flash-preview", "name": "Gemini 3 Flash Preview", "provider": "Google"},
+    # OpenRouter models (all non-Ollama models route through OpenRouter)
+    {"id": "openrouter/free", "name": "OpenRouter Free (Auto)", "provider": "OpenRouter", "free": True},
     {"id": "meta-llama/llama-3.3-70b-instruct:free", "name": "Llama 3.3 70B Instruct", "provider": "OpenRouter", "free": True},
     {"id": "z-ai/glm-4.5-air:free", "name": "GLM-4.5 Air", "provider": "OpenRouter", "free": True},
     {"id": "nvidia/nemotron-3-nano-30b-a3b:free", "name": "Nemotron 3 Nano 30B A3B", "provider": "OpenRouter", "free": True},
     {"id": "deepseek/deepseek-r1-0528:free", "name": "DeepSeek R1 0528", "provider": "OpenRouter", "free": True},
     {"id": "arcee-ai/trinity-mini:free", "name": "Trinity Mini", "provider": "OpenRouter", "free": True},
-    {"id": "openrouter/free", "name": "OpenRouter Free (Auto)", "provider": "OpenRouter", "free": True},
-    {"id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet", "provider": "Anthropic"},
-    {"id": "mistralai/mistral-large-latest", "name": "Mistral Large (Latest)", "provider": "Mistral"},
+    # Premium models via OpenRouter
+    {"id": "google/gemini-3-flash-preview", "name": "Gemini 3 Flash Preview", "provider": "OpenRouter"},
+    {"id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "OpenRouter"},
+    {"id": "openai/gpt-4-turbo", "name": "GPT-4 Turbo", "provider": "OpenRouter"},
+    {"id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet", "provider": "OpenRouter"},
+    {"id": "mistralai/mistral-large-latest", "name": "Mistral Large (Latest)", "provider": "OpenRouter"},
+    {"id": "mistralai/devstral-2", "name": "Devstral 2", "provider": "OpenRouter"},
+    # Ollama models (local, not via OpenRouter)
+    {"id": "ollama/llama3.2", "name": "Llama 3.2 (Local)", "provider": "Ollama"},
+    {"id": "ollama/mistral", "name": "Mistral (Local)", "provider": "Ollama"},
 ]
 
 DEFAULT_MODEL = "google/gemini-3-flash-preview"

@@ -84,6 +84,7 @@ class SessionContext(BaseModel):
     preferred_import_method: Optional[str] = None
     last_balance_query: Optional[datetime] = None
     last_balance_result: Optional[Dict[str, Any]] = None
+    web_search_enabled: bool = False  # Web search costs ~$0.02/query, default OFF
 
 
 class ErrorRecoveryState(BaseModel):

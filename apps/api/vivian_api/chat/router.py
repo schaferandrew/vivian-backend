@@ -19,6 +19,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
+    web_search_enabled: bool = False  # Explicitly default to False to avoid unexpected charges
 
 
 class ChatResponse(BaseModel):
@@ -150,8 +151,9 @@ async def chat_message(request: ChatRequest):
     ]
     
     # Get response from OpenRouter
+    # Use request's web_search_enabled setting (default False to avoid unexpected costs)
     try:
-        response_text = await get_chat_completion(messages)
+        response_text = await get_chat_completion(messages, web_search_enabled=request.web_search_enabled)
     except OpenRouterCreditsError as e:
         # Handle model not found (404) errors vs insufficient credits (402) errors
         if "Model error" in e.message:

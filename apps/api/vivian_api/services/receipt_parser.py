@@ -85,7 +85,8 @@ class OpenRouterService:
                 "model": self.settings.openrouter_model,
                 "messages": messages,
                 "max_tokens": 1000,
-                "temperature": 0.1
+                "temperature": 0.1,
+                "plugins": [{"id": "web", "enabled": False}],  # Explicitly disable web search to avoid unexpected charges
             }
         )
         

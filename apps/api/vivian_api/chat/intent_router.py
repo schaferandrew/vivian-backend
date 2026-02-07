@@ -164,7 +164,8 @@ class IntentRouter:
                     "model": self.llm.settings.openrouter_model,
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 300,
-                    "temperature": 0.1
+                    "temperature": 0.1,
+                    "plugins": [{"id": "web", "enabled": False}],  # Explicitly disable web search to avoid unexpected charges
                 }
             )
             if response.status_code == 402:

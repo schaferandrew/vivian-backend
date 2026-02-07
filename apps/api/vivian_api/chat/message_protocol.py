@@ -15,7 +15,8 @@ class MessageType(str, Enum):
     FILE_CHUNK = "file_chunk"
     ACTION = "action"
     HANDSHAKE = "handshake"
-    
+    SETTINGS = "settings"  # For updating session settings like web_search_enabled
+
     # Server to Client
     AGENT_TEXT = "agent_text"
     CONFIRMATION_REQUEST = "confirmation_request"
@@ -24,6 +25,7 @@ class MessageType(str, Enum):
     ERROR = "error"
     TYPING = "typing"
     HANDSHAKE_RESPONSE = "handshake_response"
+    SETTINGS_RESPONSE = "settings_response"  # Confirmation of settings update
 
 
 class ActionButton(BaseModel):
@@ -92,6 +94,20 @@ class HandshakePayload(BaseModel):
     client_version: str = "1.0.0"
     requested_capabilities: List[str] = Field(default_factory=list)
     resume_session_id: Optional[str] = None
+
+
+class SettingsPayload(BaseModel):
+    """Payload for updating session settings."""
+    setting: Literal["web_search_enabled"]
+    value: bool
+
+
+class SettingsResponsePayload(BaseModel):
+    """Payload for settings update confirmation."""
+    setting: str
+    value: bool
+    success: bool
+    message: Optional[str] = None
 
 
 # Server to Client Messages

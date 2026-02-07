@@ -33,21 +33,24 @@ class ChatHandler:
     
     async def handle_message(self, session: ChatSession, message: ChatMessage):
         """Route and handle incoming chat messages."""
-        
+
         if message.type == MessageType.TEXT:
             await self._handle_text(session, message.payload.get("content", ""))
-            
+
         elif message.type == MessageType.COMMAND:
             await self._handle_command(session, message.payload)
-            
+
         elif message.type == MessageType.ACTION:
             await self._handle_action(session, message.payload)
-            
+
         elif message.type == MessageType.FILE_UPLOAD:
             await self._handle_file_upload(session, message.payload)
-            
+
         elif message.type == MessageType.HANDSHAKE:
             await self._handle_handshake(session)
+
+        elif message.type == MessageType.SETTINGS:
+            await self._handle_settings(session, message.payload)
     
     async def _handle_text(self, session: ChatSession, content: str):
         """Handle text messages."""
@@ -233,9 +236,9 @@ class ChatHandler:
     async def _handle_handshake(self, session: ChatSession):
         """Handle initial connection handshake."""
         from vivian_api.chat.message_protocol import HandshakeResponsePayload
-        
+
         welcome = VivianPersonality.WELCOME_NEW
-        
+
         message = ChatMessage(
             type=MessageType.HANDSHAKE_RESPONSE,
             session_id=session.session_id,
@@ -245,8 +248,42 @@ class ChatHandler:
                 welcome_message=welcome
             ).model_dump()
         )
-        
+
         await connection_manager.send_to_session(session.session_id, message)
+
+    async def _handle_settings(self, session: ChatSession, payload: dict):
+        """Handle settings updates like web search toggle."""
+        from vivian_api.chat.message_protocol import SettingsResponsePayload, MessageType
+
+        setting = payload.get("setting")
+        value = payload.get("value")
+
+        if setting == "web_search_enabled":
+            session.context.web_search_enabled = bool(value)
+
+            response = ChatMessage(
+                type=MessageType.SETTINGS_RESPONSE,
+                session_id=session.session_id,
+                payload=SettingsResponsePayload(
+                    setting="web_search_enabled",
+                    value=session.context.web_search_enabled,
+                    success=True,
+                    message=f"Web search {'enabled' if session.context.web_search_enabled else 'disabled'}."
+                ).model_dump()
+            )
+            await connection_manager.send_to_session(session.session_id, response)
+        else:
+            response = ChatMessage(
+                type=MessageType.SETTINGS_RESPONSE,
+                session_id=session.session_id,
+                payload=SettingsResponsePayload(
+                    setting=setting or "unknown",
+                    value=value,
+                    success=False,
+                    message=f"Unknown setting: {setting}"
+                ).model_dump()
+            )
+            await connection_manager.send_to_session(session.session_id, response)
 
 
 # Global handler instance
