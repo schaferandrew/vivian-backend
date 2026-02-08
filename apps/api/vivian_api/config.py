@@ -117,10 +117,27 @@ class Settings(BaseSettings):
     
     # CORS
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:3001"]
+
+    # Google OAuth for settings-driven Drive/Sheets connection
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_refresh_token: str = ""
+    google_oauth_redirect_uri: str = "http://localhost:8000/api/v1/integrations/google/oauth/callback"
+    google_oauth_success_redirect: str = "http://localhost:3000/settings?google=connected"
+    google_oauth_error_redirect: str = "http://localhost:3000/settings?google=error"
+    google_oauth_token_store_path: str = "/tmp/vivian-google-oauth.json"
+
+    # MCP target IDs (needed once connected)
+    mcp_drive_root_folder_id: str = ""
+    mcp_reimbursed_folder_id: str = ""
+    mcp_unreimbursed_folder_id: str = ""
+    mcp_not_eligible_folder_id: str = ""
+    mcp_sheets_spreadsheet_id: str = ""
     
     class Config:
         env_file = ".env"
         env_prefix = "VIVIAN_API_"
+        extra = "ignore"
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

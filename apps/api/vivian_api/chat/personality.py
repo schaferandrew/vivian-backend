@@ -113,9 +113,16 @@ Could you double-check these details? You can edit anything that looks off."""
 
 • **Already reimbursed** - I'll mark it as reimbursed
 • **Save for later** - I'll track it as unreimbursed
-• **Not eligible** - This isn't an HSA-eligible expense
 
 Which applies?"""
+
+    NOT_ELIGIBLE_PROMPT = """⚠️ This receipt looks **not HSA-eligible**.
+
+I can:
+• **Ignore it** (no Drive upload and no ledger entry)
+• **Save anyway** if you want to override that decision
+
+What would you like to do?"""
 
     # Success messages
     RECEIPT_SAVED = """✓ **Receipt saved successfully!**

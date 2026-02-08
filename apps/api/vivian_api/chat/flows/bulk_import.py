@@ -196,6 +196,11 @@ class BulkImportFlow:
                         amount=float(parsed_data.get("amount", 0)),
                         hsa_eligible=parsed_data.get("hsa_eligible", True)
                     )
+
+                    if not expense.hsa_eligible:
+                        failed += 1
+                        failed_files.append((Path(file_path).name, "Skipped: marked not HSA-eligible"))
+                        continue
                     
                     ledger_result = await mcp_client.append_to_ledger(
                         expense.model_dump(),

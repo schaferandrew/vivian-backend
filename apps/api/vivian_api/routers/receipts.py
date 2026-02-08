@@ -1,5 +1,6 @@
 """Receipt upload and parsing router."""
 
+import logging
 import shutil
 import uuid
 from pathlib import Path
@@ -10,6 +11,7 @@ from fastapi.responses import JSONResponse
 from vivian_api.config import Settings
 from vivian_api.models.schemas import (
     ReceiptUploadResponse, 
+    ParseReceiptRequest,
     ReceiptParseResponse,
     ConfirmReceiptRequest,
     ConfirmReceiptResponse,
@@ -18,12 +20,13 @@ from vivian_api.models.schemas import (
     BulkImportFileResult
 )
 from vivian_api.services.receipt_parser import OpenRouterService
-from vivian_api.services.mcp_client import MCPClient
+from vivian_api.services.mcp_client import MCPClient, MCPClientError
 from vivian_shared.models import ParsedReceipt, ExpenseSchema, ReimbursementStatus
 
 
 router = APIRouter(prefix="/receipts", tags=["receipts"])
 settings = Settings()
+logger = logging.getLogger(__name__)
 
 
 def get_temp_dir() -> Path:
@@ -55,11 +58,12 @@ async def upload_receipt(file: UploadFile = File(...)):
             message="Receipt uploaded successfully. Use this path to parse."
         )
     except Exception as e:
+        logger.exception("Failed to save uploaded receipt to temporary storage: %s", temp_path)
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
 
 
 @router.post("/parse", response_model=ReceiptParseResponse)
-async def parse_receipt(temp_file_path: str):
+async def parse_receipt(request: ParseReceiptRequest):
     """Parse a previously uploaded receipt using OpenRouter.
     
     Returns structured expense data with confidence score.
@@ -67,7 +71,7 @@ async def parse_receipt(temp_file_path: str):
     parser = OpenRouterService()
     
     try:
-        result = await parser.parse_receipt(temp_file_path)
+        result = await parser.parse_receipt(request.temp_file_path)
         
         if not result.get("success"):
             raise HTTPException(
@@ -108,10 +112,19 @@ async def parse_receipt(temp_file_path: str):
         return ReceiptParseResponse(
             parsed_data=parsed_receipt,
             needs_review=needs_review,
-            temp_file_path=temp_file_path
+            temp_file_path=request.temp_file_path
         )
         
+    except HTTPException as exc:
+        if exc.status_code >= 500:
+            logger.error(
+                "Receipt parse failed with HTTPException for temp_file_path=%s: %s",
+                request.temp_file_path,
+                exc.detail,
+            )
+        raise
     except Exception as e:
+        logger.exception("Unexpected error while parsing receipt temp_file_path=%s", request.temp_file_path)
         raise HTTPException(status_code=500, detail=f"Parsing failed: {str(e)}")
     finally:
         await parser.close()
@@ -128,6 +141,23 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
     await mcp_client.start()
     
     try:
+        # Non-HSA-eligible receipts should not be persisted.
+        if (
+            request.status == ReimbursementStatus.NOT_HSA_ELIGIBLE
+            or not request.expense_data.hsa_eligible
+        ):
+            temp_path = Path(request.temp_file_path)
+            if temp_path.exists():
+                temp_path.unlink()
+
+            return ConfirmReceiptResponse(
+                success=True,
+                message=(
+                    "Receipt marked not HSA-eligible. No Google Drive upload or "
+                    "ledger entry was created."
+                )
+            )
+
         # Upload to Google Drive
         upload_result = await mcp_client.upload_receipt_to_drive(
             request.temp_file_path,
@@ -136,12 +166,32 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
         )
         
         if not upload_result.get("success"):
-            raise HTTPException(
-                status_code=500,
-                detail=f"Drive upload failed: {upload_result.get('error')}"
+            logger.error(
+                "Drive upload failed for temp_file_path=%s status=%s error=%s",
+                request.temp_file_path,
+                request.status.value,
+                upload_result.get("error"),
             )
-        
-        drive_file_id = upload_result["file_id"]
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Could not upload receipt to Google Drive. "
+                    f"{upload_result.get('error', 'Unknown error')}"
+                )
+            )
+
+        drive_file_id = upload_result.get("file_id")
+        if not drive_file_id:
+            logger.error(
+                "Drive upload response missing file_id for temp_file_path=%s status=%s payload=%s",
+                request.temp_file_path,
+                request.status.value,
+                upload_result,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="Drive upload did not return a file ID. Please try again."
+            )
         
         # Add to ledger
         expense_dict = request.expense_data.model_dump()
@@ -156,9 +206,18 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
         )
         
         if not ledger_result.get("success"):
+            logger.error(
+                "Ledger update failed for drive_file_id=%s status=%s error=%s",
+                drive_file_id,
+                request.status.value,
+                ledger_result.get("error"),
+            )
             raise HTTPException(
-                status_code=500,
-                detail=f"Ledger update failed: {ledger_result.get('error')}"
+                status_code=502,
+                detail=(
+                    "Could not update Google Sheet ledger. "
+                    f"{ledger_result.get('error', 'Unknown error')}"
+                )
             )
         
         # Clean up temp file
@@ -173,8 +232,35 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
             message="Receipt saved successfully"
         )
         
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save receipt: {str(e)}")
+    except HTTPException as exc:
+        if exc.status_code >= 500:
+            logger.error(
+                "Receipt confirm failed for temp_file_path=%s status=%s: %s",
+                request.temp_file_path,
+                request.status.value,
+                exc.detail,
+            )
+        raise
+    except MCPClientError as e:
+        logger.exception(
+            "MCP client error while saving receipt temp_file_path=%s status=%s",
+            request.temp_file_path,
+            request.status.value,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not save receipt right now. {str(e)}"
+        )
+    except Exception:
+        logger.exception(
+            "Unexpected error while confirming receipt temp_file_path=%s status=%s",
+            request.temp_file_path,
+            request.status.value,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save receipt due to an unexpected server error."
+        )
     finally:
         await mcp_client.stop()
 
@@ -235,6 +321,15 @@ async def bulk_import_receipts(request: BulkImportRequest):
                     raw_model_output=parse_result.get("raw_output")
                 )
                 
+                # Skip non-HSA-eligible receipts entirely.
+                if not expense.hsa_eligible:
+                    results.append(BulkImportFileResult(
+                        filename=pdf_file.name,
+                        success=False,
+                        error="Skipped: marked not HSA-eligible"
+                    ))
+                    continue
+
                 # Determine status
                 status = request.status_override or ReimbursementStatus.UNREIMBURSED
                 
