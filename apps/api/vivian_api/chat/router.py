@@ -43,30 +43,106 @@ SUMMARY_MODEL_ID = "meta-llama/llama-3.3-70b-instruct:free"
 
 
 async def generate_summary_from_messages(messages: list) -> tuple[str, str]:
-    """Generate a summary and title from chat messages using Llama 3.3 70B."""
+    """Generate a concise chat title/summary from chat messages."""
     if not messages:
-        return "New Chat", "New conversation"
+        return "New Chat", "New Chat"
 
-    first_user_message = ""
-    for msg in messages:
-        if msg.get("role") == "user":
-            first_user_message = msg.get("content", "")
-            break
+    user_messages = [
+        str(msg.get("content", "")).strip()
+        for msg in messages
+        if msg.get("role") == "user" and str(msg.get("content", "")).strip()
+    ]
+    first_user_message = user_messages[0] if user_messages else ""
+    latest_user_message = user_messages[-1] if user_messages else ""
 
     if not first_user_message:
-        return "New Chat", "No user messages"
+        return "New Chat", "New Chat"
 
     content_preview = first_user_message[:100].replace("\n", " ")
+    summary_source = latest_user_message or first_user_message
 
-    system_prompt = """You are a chat title generator. Given a conversation, generate:
-1. A very short title (3-5 words maximum) that summarizes the conversation topic
-2. A brief 1-sentence summary of the conversation
+    stop_words = {
+        "a", "an", "and", "are", "as", "at", "be", "can", "do", "for", "from",
+        "get", "give", "hello", "help", "hi", "how", "i", "in", "installed", "is",
+        "it", "just", "let", "me", "my", "of", "on", "or", "our", "please", "set",
+        "show", "test", "that", "the", "this", "to", "up", "we", "with", "you",
+        "your",
+    }
 
-Respond in the following format:
-TITLE: <short title>
-SUMMARY: <brief summary>"""
+    keyword_priority = [
+        "markdown", "renderer", "test", "summary", "title", "chat", "session",
+        "hsa", "receipt", "balance", "upload", "settings", "model",
+    ]
 
-    user_prompt = f"First message: {first_user_message}\n\nGenerate title and summary:"
+    def normalize_three_word_title(raw: str, fallback: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9\s'-]", " ", raw).strip()
+        parts = [part for part in cleaned.split() if part]
+        if not parts:
+            fallback_clean = re.sub(r"[^A-Za-z0-9\s'-]", " ", fallback).strip()
+            parts = [part for part in fallback_clean.split() if part]
+        if not parts:
+            return "New Chat"
+        short_title = " ".join(parts[:3]).strip()
+        return short_title[:40] if short_title else "New Chat"
+
+    def keyword_fallback_title(primary: str, secondary: str = "") -> str:
+        source = f"{primary} {secondary}".strip()
+        tokens = re.findall(r"[A-Za-z0-9']+", source.lower())
+
+        selected: list[str] = []
+        for keyword in keyword_priority:
+            if keyword in tokens and keyword not in selected:
+                selected.append(keyword)
+            if len(selected) >= 3:
+                break
+
+        if len(selected) < 3:
+            for token in tokens:
+                if token in stop_words or len(token) < 3 or token in selected:
+                    continue
+                selected.append(token)
+                if len(selected) >= 3:
+                    break
+
+        if not selected:
+            return "New Chat"
+
+        words = selected[:3]
+        if len(words) == 1:
+            words.extend(["Chat", "Summary"])
+        elif len(words) == 2:
+            words.append("Chat")
+
+        return " ".join(word.capitalize() for word in words)
+
+    system_prompt = """You write chat list titles.
+
+Rules:
+- Return EXACTLY 3 words for TITLE.
+- TITLE must be specific to the user intent, not generic.
+- Use plain words only (no punctuation, no quotes, no emoji).
+- Prefer noun-heavy phrasing (what user wants), not conversational phrasing.
+- SUMMARY must be identical to TITLE.
+- Ignore conversational lead-ins such as "I just installed", "Hello", or "Can you".
+
+Example:
+User asks about testing markdown rendering.
+TITLE: Markdown Renderer Test
+SUMMARY: Markdown Renderer Test
+
+Output format (must match exactly):
+TITLE: <three words>
+SUMMARY: <same three words>"""
+
+    context_block = "\n".join(
+        f"- {msg[:220].replace(chr(10), ' ')}" for msg in user_messages[-4:]
+    )
+    user_prompt = (
+        f"Conversation user messages:\n{context_block}\n\n"
+        f"First user message: {first_user_message}\n"
+        f"Latest user message: {latest_user_message}\n\n"
+        "Generate the title and summary now."
+    )
 
     try:
         async with httpx.AsyncClient() as client:
@@ -92,25 +168,37 @@ SUMMARY: <brief summary>"""
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
 
-                title = "New Chat"
-                summary = ""
+                title_raw = ""
+                summary_raw = ""
 
                 for line in content.split("\n"):
-                    if line.startswith("TITLE:"):
-                        title = line.replace("TITLE:", "").strip()
-                    elif line.startswith("SUMMARY:"):
-                        summary = line.replace("SUMMARY:", "").strip()
+                    line_clean = line.strip()
+                    if line_clean.upper().startswith("TITLE:"):
+                        title_raw = line_clean.split(":", 1)[1].strip()
+                    elif line_clean.upper().startswith("SUMMARY:"):
+                        summary_raw = line_clean.split(":", 1)[1].strip()
 
-                if not title or len(title) > 50:
-                    title = content_preview[:50] + "..." if len(content_preview) > 50 else content_preview
+                generated_text = title_raw or summary_raw or content_preview
+                short_title = normalize_three_word_title(generated_text, summary_source)
 
-                return title, summary
+                weak_prefixes = ("i ", "i just", "hello", "hi ")
+                if (
+                    short_title.lower() == "new chat"
+                    or short_title.lower().startswith(weak_prefixes)
+                ):
+                    short_title = keyword_fallback_title(summary_source, first_user_message)
+
+                short_summary = short_title
+
+                return short_title, short_summary
             else:
                 print(f"Summary generation failed: {response.text}")
-                return content_preview[:50] + "..." if len(content_preview) > 50 else content_preview, ""
+                fallback = keyword_fallback_title(summary_source, first_user_message)
+                return fallback, fallback
     except Exception as e:
         print(f"Error generating summary: {e}")
-        return content_preview[:50] + "..." if len(content_preview) > 50 else content_preview, ""
+        fallback = keyword_fallback_title(summary_source, first_user_message)
+        return fallback, fallback
 
 
 @router.get("/models")
@@ -284,9 +372,8 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
             messages_dict = [msg.to_dict() for msg in db_messages]
             title, summary = await generate_summary_from_messages(messages_dict)
 
-            if db_chat.title == "New Chat" or not db_chat.title:
+            if title:
                 chat_repo.update_title(db_chat.id, title)
-
             if summary:
                 chat_repo.update_summary(db_chat.id, summary)
         except Exception as e:

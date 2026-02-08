@@ -135,9 +135,8 @@ async def generate_summary(
     from vivian_api.chat.router import generate_summary_from_messages
     title, summary = await generate_summary_from_messages(messages_dict)
 
-    if db_chat.title == "New Chat" or not db_chat.title:
+    if title:
         chat_repo.update_title(chat_id, title)
-
     if summary:
         chat_repo.update_summary(chat_id, summary)
 
