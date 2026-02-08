@@ -1,6 +1,26 @@
 # Backend only. One API instance; clients (vivian-client, other devices) run separately
 # and connect to this API. For local dev with a client, run the client from its own repo.
 services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: vivian
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d vivian"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - vivian-network
+    restart: unless-stopped
+
   api:
     build:
       context: .
@@ -16,6 +36,7 @@ services:
       - VIVIAN_MCP_DRIVE_ROOT_FOLDER_ID=${DRIVE_ROOT_FOLDER_ID}
       - VIVIAN_MCP_SHEETS_SPREADSHEET_ID=${SHEETS_SPREADSHEET_ID}
       - VIVIAN_API_OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - VIVIAN_API_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/vivian
     volumes:
       # Writable by container user (UID 1000); ensure host ./tmp is owned by 1000 or world-writable
       - ./tmp:/tmp/vivian-uploads
@@ -23,10 +44,16 @@ services:
       - ./apps/api:/app
     networks:
       - vivian-network
-    restart: no
+    restart: unless-stopped
     stop_grace_period: 30s
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
 
 networks:
   vivian-network:

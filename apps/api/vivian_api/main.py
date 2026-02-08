@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from vivian_api.config import Settings
 from vivian_api.routers import receipts, ledger
-from vivian_api.chat import chat_router
+from vivian_api.chat import chat_router, history_router
 from vivian_api.models.schemas import HealthCheckResponse
 
 
@@ -45,6 +45,7 @@ app.add_middleware(
 app.include_router(receipts.router, prefix="/api/v1")
 app.include_router(ledger.router, prefix="/api/v1")
 app.include_router(chat_router, prefix="/api/v1")
+app.include_router(history_router, prefix="/api/v1")
 
 
 @app.get("/health", response_model=HealthCheckResponse)

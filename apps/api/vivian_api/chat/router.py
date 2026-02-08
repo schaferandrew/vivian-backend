@@ -1,8 +1,10 @@
 """Chat WebSocket router."""
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
+import httpx
 
 from vivian_api.chat.connection import connection_manager
 from vivian_api.chat.session import session_manager
@@ -11,6 +13,8 @@ from vivian_api.chat.message_protocol import ChatMessage
 from vivian_api.chat.personality import VivianPersonality
 from vivian_api.services.llm import get_chat_completion, OpenRouterCreditsError, OpenRouterRateLimitError
 from vivian_api.config import AVAILABLE_MODELS, DEFAULT_MODEL, Settings, check_ollama_status, get_selected_model, set_selected_model
+from vivian_api.db.database import get_db
+from vivian_api.repositories import ChatMessageRepository, ChatRepository
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -19,12 +23,14 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
-    web_search_enabled: bool = False  # Explicitly default to False to avoid unexpected charges
+    chat_id: str | None = None
+    web_search_enabled: bool = False
 
 
 class ChatResponse(BaseModel):
     response: str
     session_id: str
+    chat_id: str
 
 
 class ModelSelectRequest(BaseModel):
@@ -32,6 +38,79 @@ class ModelSelectRequest(BaseModel):
 
 
 settings = Settings()
+
+SUMMARY_MODEL_ID = "meta-llama/llama-3.3-70b-instruct:free"
+
+
+async def generate_summary_from_messages(messages: list) -> tuple[str, str]:
+    """Generate a summary and title from chat messages using Llama 3.3 70B."""
+    if not messages:
+        return "New Chat", "New conversation"
+
+    first_user_message = ""
+    for msg in messages:
+        if msg.get("role") == "user":
+            first_user_message = msg.get("content", "")
+            break
+
+    if not first_user_message:
+        return "New Chat", "No user messages"
+
+    content_preview = first_user_message[:100].replace("\n", " ")
+
+    system_prompt = """You are a chat title generator. Given a conversation, generate:
+1. A very short title (3-5 words maximum) that summarizes the conversation topic
+2. A brief 1-sentence summary of the conversation
+
+Respond in the following format:
+TITLE: <short title>
+SUMMARY: <brief summary>"""
+
+    user_prompt = f"First message: {first_user_message}\n\nGenerate title and summary:"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{settings.openrouter_base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.openrouter_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": SUMMARY_MODEL_ID,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "max_tokens": 100,
+                    "temperature": 0.3,
+                },
+                timeout=30.0,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+
+                title = "New Chat"
+                summary = ""
+
+                for line in content.split("\n"):
+                    if line.startswith("TITLE:"):
+                        title = line.replace("TITLE:", "").strip()
+                    elif line.startswith("SUMMARY:"):
+                        summary = line.replace("SUMMARY:", "").strip()
+
+                if not title or len(title) > 50:
+                    title = content_preview[:50] + "..." if len(content_preview) > 50 else content_preview
+
+                return title, summary
+            else:
+                print(f"Summary generation failed: {response.text}")
+                return content_preview[:50] + "..." if len(content_preview) > 50 else content_preview, ""
+    except Exception as e:
+        print(f"Error generating summary: {e}")
+        return content_preview[:50] + "..." if len(content_preview) > 50 else content_preview, ""
 
 
 @router.get("/models")
@@ -128,19 +207,35 @@ async def get_session(session_id: str):
 
 
 @router.post("/message", response_model=ChatResponse)
-async def chat_message(request: ChatRequest):
+async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
     """HTTP endpoint for chat messages using OpenRouter."""
-    # Get or create session
+    chat_repo = ChatRepository(db)
+    message_repo = ChatMessageRepository(db)
+
+    # Resolve or create persistent chat independently from session state.
+    db_chat = None
+    if request.chat_id:
+        db_chat = chat_repo.get(request.chat_id)
+        if not db_chat:
+            raise HTTPException(status_code=404, detail="Chat not found")
+    else:
+        db_chat = chat_repo.create(title="New Chat", model=get_selected_model())
+
+    # Get or create session (in-memory)
     if request.session_id:
         session = session_manager.get_session(request.session_id)
         if not session:
             session = session_manager.create_session(session_id=request.session_id)
     else:
         session = session_manager.create_session()
-    
-    # Store user message
+
+    # Store user message in PostgreSQL if chat exists
+    if db_chat:
+        message_repo.create(chat_id=db_chat.id, role="user", content=request.message)
+
+    # Store user message in session (in-memory)
     session.add_message(role="user", content=request.message)
-    
+
     # Convert session messages to OpenRouter format; prepend system prompt so model stays in character
     messages = [
         {"role": "system", "content": VivianPersonality.get_system_prompt()},
@@ -149,7 +244,7 @@ async def chat_message(request: ChatRequest):
             for msg in session.messages
         ),
     ]
-    
+
     # Get response from OpenRouter
     # Use request's web_search_enabled setting (default False to avoid unexpected costs)
     try:
@@ -170,13 +265,40 @@ async def chat_message(request: ChatRequest):
             status_code=429,
             content={"error": "rate_limit", "message": e.message},
         )
+    except Exception as e:
+        print(f"Error getting chat completion: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": "server_error", "message": str(e)},
+        )
 
-    # Store assistant response
+    # Store assistant response in PostgreSQL if chat exists
+    if db_chat:
+        message_repo.create(chat_id=db_chat.id, role="assistant", content=response_text)
+
+        # Generate summary on server side after saving messages
+        try:
+            db_messages = message_repo.list_for_chat(db_chat.id)
+            messages_dict = [msg.to_dict() for msg in db_messages]
+            title, summary = await generate_summary_from_messages(messages_dict)
+
+            if db_chat.title == "New Chat" or not db_chat.title:
+                chat_repo.update_title(db_chat.id, title)
+
+            if summary:
+                chat_repo.update_summary(db_chat.id, summary)
+        except Exception as e:
+            print(f"Error generating summary: {e}")
+
+    # Store assistant response in session (in-memory)
     session.add_message(role="assistant", content=response_text)
 
     return ChatResponse(
         response=response_text,
-        session_id=session.session_id
+        session_id=session.session_id,
+        chat_id=db_chat.id,
     )
 
 

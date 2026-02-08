@@ -101,6 +101,24 @@ python -m vivian_api.main
 curl http://localhost:8000/health
 ```
 
+### Database Migrations (Alembic)
+
+```bash
+cd apps/api
+alembic -c alembic.ini upgrade head
+```
+
+Create a new migration after model changes:
+
+```bash
+cd apps/api
+alembic -c alembic.ini revision --autogenerate -m "your change"
+alembic -c alembic.ini upgrade head
+```
+
+For a quick walkthrough of models/repositories/migrations, see:
+`docs/DATABASE_TOUR.md`
+
 ### Using Docker
 
 ```bash

@@ -19,8 +19,8 @@ AVAILABLE_MODELS = [
     {"id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "OpenRouter"},
     {"id": "openai/gpt-4-turbo", "name": "GPT-4 Turbo", "provider": "OpenRouter"},
     {"id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet", "provider": "OpenRouter"},
-    {"id": "mistralai/mistral-large-latest", "name": "Mistral Large (Latest)", "provider": "OpenRouter"},
-    {"id": "mistralai/devstral-2", "name": "Devstral 2", "provider": "OpenRouter"},
+    {"id": "mistralai/mistral-large-2512", "name": "Mistral Large (Latest)", "provider": "OpenRouter"},
+    {"id": "mistralai/devstral-2512", "name": "Devstral 2", "provider": "OpenRouter"},
     # Ollama models (local, not via OpenRouter)
     {
         "id": "qwen2.5-coder:3b",
@@ -82,17 +82,9 @@ def set_selected_model(model_id: str) -> None:
     _global_state["selected_model"] = model_id
 
 
-def check_ollama_status() -> dict:
-    """Check if Ollama is running."""
-    ollama_url = Settings.get_ollama_base_url()
-    try:
-        with httpx.Client() as client:
-            response = client.get(f"{ollama_url}/api/tags", timeout=2.0)
-            if response.status_code == 200:
-                return {"status": "running", "available": True}
-            return {"status": "error", "available": False}
-    except Exception:
-        return {"status": "offline", "available": False}
+def get_ollama_base_url() -> str:
+    """Get Ollama base URL."""
+    return os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
 
 class Settings(BaseSettings):
@@ -111,9 +103,8 @@ class Settings(BaseSettings):
     selected_model: str = DEFAULT_MODEL
     ollama_base_url: str = ""
     
-    @staticmethod
-    def get_ollama_base_url() -> str:
-        return os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    # Database URL (for SQLAlchemy)
+    database_url: str = ""
     
     # MCP Server (path inside Docker container)
     mcp_server_path: str = "/mcp-server"
@@ -136,3 +127,22 @@ class Settings(BaseSettings):
         # Override with environment variable if set
         if "OPENROUTER_API_KEY" in os.environ:
             self.openrouter_api_key = os.environ["OPENROUTER_API_KEY"]
+        # Also check for non-prefixed DATABASE_URL
+        if "DATABASE_URL" in os.environ and not self.database_url:
+            self.database_url = os.environ["DATABASE_URL"]
+
+
+def check_ollama_status() -> dict:
+    """Check if Ollama is running."""
+    ollama_url = get_ollama_base_url()
+    try:
+        with httpx.Client() as client:
+            response = client.get(f"{ollama_url}/api/tags", timeout=2.0)
+            if response.status_code == 200:
+                return {"status": "running", "available": True}
+            return {"status": "error", "available": False}
+    except Exception:
+        return {"status": "offline", "available": False}
+
+
+settings = Settings()

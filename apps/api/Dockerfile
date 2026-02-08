@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-    gcc \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy and install shared package first
@@ -14,6 +14,10 @@ RUN pip install -e /packages/shared
 # Copy and install API
 COPY apps/api /app
 RUN pip install -e .
+
+# Copy entrypoint script
+COPY apps/api/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 # Non-root user: one backend, many clients; avoid running as root
 RUN groupadd --gid 1000 vivian \
@@ -25,4 +29,4 @@ USER vivian
 
 EXPOSE 8000
 
-CMD ["python", "-m", "vivian_api.main"]
+CMD ["/entrypoint.sh"]
