@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import httpx
+import re
 
 from vivian_api.chat.connection import connection_manager
 from vivian_api.chat.session import session_manager
@@ -39,7 +40,76 @@ class ModelSelectRequest(BaseModel):
 
 settings = Settings()
 
-SUMMARY_MODEL_ID = "meta-llama/llama-3.3-70b-instruct:free"
+SUMMARY_MODEL_ID = "google/gemini-3-flash-preview"
+SUMMARY_REFINEMENT_MIN_MESSAGES = 4
+
+
+def _normalize_title(raw: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9\s'-]", " ", (raw or "")).strip()
+    if not cleaned:
+        cleaned = re.sub(r"[^A-Za-z0-9\s'-]", " ", (fallback or "")).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return "New Chat"
+
+    words = cleaned.split()
+    title = " ".join(words[:10]).strip()
+    title = title[:72].strip()
+    if not title:
+        return "New Chat"
+    return title[0].upper() + title[1:] if len(title) > 1 else title.upper()
+
+
+def _is_low_signal_user_message(text: str) -> bool:
+    message = (text or "").strip().lower()
+    if not message:
+        return True
+
+    message = re.sub(r"\s+", " ", message)
+    low_signal_patterns = (
+        r"^(thanks|thank you|thx)\b",
+        r"^(great|awesome|perfect|cool|nice)\b",
+        r"^(sounds good|that works|got it|understood)\b",
+        r"^(let'?s talk|let us talk)\b",
+        r"^(anything else|what next)\b",
+    )
+    return any(re.search(pattern, message) for pattern in low_signal_patterns)
+
+
+def _select_intent_anchor(user_messages: list[str]) -> str:
+    """Pick a user message that captures intent, skipping pleasantries/closures."""
+    candidates = [msg.strip() for msg in user_messages if msg and msg.strip()]
+    if not candidates:
+        return ""
+
+    substantive = [msg for msg in candidates if not _is_low_signal_user_message(msg)]
+    if substantive:
+        # Use latest substantive ask to reflect the active task while avoiding end-of-chat thanks.
+        return substantive[-1]
+
+    return candidates[-1]
+
+
+def _build_initial_title_from_first_user_message(message: str) -> str:
+    source = (message or "").strip()
+    if not source:
+        return "New Chat"
+
+    # Remove common conversational lead-ins so titles start with user intent.
+    source = re.sub(
+        r"^\s*(hi|hello|hey|yo)\b[\s,!.-]*",
+        "",
+        source,
+        flags=re.IGNORECASE,
+    )
+    source = re.sub(
+        r"^\s*(can you|could you|would you|please|help me|i need|i want to|i just)\b[\s,:-]*",
+        "",
+        source,
+        flags=re.IGNORECASE,
+    )
+
+    return _normalize_title(source, message)
 
 
 async def generate_summary_from_messages(messages: list) -> tuple[str, str]:
@@ -54,36 +124,27 @@ async def generate_summary_from_messages(messages: list) -> tuple[str, str]:
     ]
     first_user_message = user_messages[0] if user_messages else ""
     latest_user_message = user_messages[-1] if user_messages else ""
+    anchor_user_message = _select_intent_anchor(user_messages)
 
     if not first_user_message:
         return "New Chat", "New Chat"
 
-    content_preview = first_user_message[:100].replace("\n", " ")
-    summary_source = latest_user_message or first_user_message
+    content_preview = anchor_user_message[:180].replace("\n", " ")
+    summary_source = anchor_user_message or first_user_message
 
     stop_words = {
         "a", "an", "and", "are", "as", "at", "be", "can", "do", "for", "from",
         "get", "give", "hello", "help", "hi", "how", "i", "in", "installed", "is",
         "it", "just", "let", "me", "my", "of", "on", "or", "our", "please", "set",
         "show", "test", "that", "the", "this", "to", "up", "we", "with", "you",
-        "your",
+        "your", "thanks", "thank", "great", "updates", "talk",
     }
 
     keyword_priority = [
-        "markdown", "renderer", "test", "summary", "title", "chat", "session",
-        "hsa", "receipt", "balance", "upload", "settings", "model",
+        "markdown", "blockquote", "rendering", "renderer", "test", "summary", "title",
+        "chat", "session", "hsa", "contribution", "limit", "limits", "eligibility",
+        "income", "magi", "receipt", "balance", "upload", "settings", "model",
     ]
-
-    def normalize_three_word_title(raw: str, fallback: str) -> str:
-        cleaned = re.sub(r"[^A-Za-z0-9\s'-]", " ", raw).strip()
-        parts = [part for part in cleaned.split() if part]
-        if not parts:
-            fallback_clean = re.sub(r"[^A-Za-z0-9\s'-]", " ", fallback).strip()
-            parts = [part for part in fallback_clean.split() if part]
-        if not parts:
-            return "New Chat"
-        short_title = " ".join(parts[:3]).strip()
-        return short_title[:40] if short_title else "New Chat"
 
     def keyword_fallback_title(primary: str, secondary: str = "") -> str:
         source = f"{primary} {secondary}".strip()
@@ -96,51 +157,58 @@ async def generate_summary_from_messages(messages: list) -> tuple[str, str]:
             if len(selected) >= 3:
                 break
 
-        if len(selected) < 3:
+        if len(selected) < 6:
             for token in tokens:
                 if token in stop_words or len(token) < 3 or token in selected:
                     continue
                 selected.append(token)
-                if len(selected) >= 3:
+                if len(selected) >= 6:
                     break
 
         if not selected:
             return "New Chat"
 
-        words = selected[:3]
-        if len(words) == 1:
-            words.extend(["Chat", "Summary"])
-        elif len(words) == 2:
-            words.append("Chat")
-
-        return " ".join(word.capitalize() for word in words)
+        words = selected[:6]
+        return _normalize_title(" ".join(word.capitalize() for word in words), first_user_message)
 
     system_prompt = """You write chat list titles.
 
 Rules:
-- Return EXACTLY 3 words for TITLE.
+- TITLE should be 2 to 6 words.
 - TITLE must be specific to the user intent, not generic.
-- Use plain words only (no punctuation, no quotes, no emoji).
+- Use plain words only (no quotes, no emoji).
 - Prefer noun-heavy phrasing (what user wants), not conversational phrasing.
-- SUMMARY must be identical to TITLE.
-- Ignore conversational lead-ins such as "I just installed", "Hello", or "Can you".
+- Ignore pure acknowledgements/closures (for example: "thanks", "great updates", "let's talk").
+- If troubleshooting display/formatting, name the concrete surface (e.g., "Markdown Rendering Test").
+- SUMMARY should be 3 to 10 words and closely match TITLE.
+- Use a substantive user ask as the anchor intent.
+- Use the most recent 6 turns to refine specificity.
 
 Example:
 User asks about testing markdown rendering.
-TITLE: Markdown Renderer Test
-SUMMARY: Markdown Renderer Test
+TITLE: Markdown Rendering Test
+SUMMARY: Markdown rendering troubleshooting
 
 Output format (must match exactly):
-TITLE: <three words>
-SUMMARY: <same three words>"""
+TITLE: <title>
+SUMMARY: <summary>"""
 
+    recent_messages = []
+    for msg in messages:
+        role = str(msg.get("role", "")).strip().lower()
+        content = str(msg.get("content", "")).strip()
+        if role in {"user", "assistant"} and content:
+            recent_messages.append({"role": role, "content": content})
+    recent_window = recent_messages[-6:]
     context_block = "\n".join(
-        f"- {msg[:220].replace(chr(10), ' ')}" for msg in user_messages[-4:]
+        f"- {m['role']}: {m['content'][:240].replace(chr(10), ' ')}"
+        for m in recent_window
     )
     user_prompt = (
-        f"Conversation user messages:\n{context_block}\n\n"
+        f"Conversation recent messages:\n{context_block}\n\n"
         f"First user message: {first_user_message}\n"
         f"Latest user message: {latest_user_message}\n\n"
+        f"Anchor user message: {anchor_user_message}\n\n"
         "Generate the title and summary now."
     )
 
@@ -178,19 +246,34 @@ SUMMARY: <same three words>"""
                     elif line_clean.upper().startswith("SUMMARY:"):
                         summary_raw = line_clean.split(":", 1)[1].strip()
 
-                generated_text = title_raw or summary_raw or content_preview
-                short_title = normalize_three_word_title(generated_text, summary_source)
+                generated_title = _normalize_title(
+                    title_raw or summary_raw or content_preview,
+                    summary_source,
+                )
+                generated_summary = (
+                    summary_raw.strip()
+                    if summary_raw and summary_raw.strip()
+                    else generated_title
+                )
+                generated_summary = re.sub(r"\s+", " ", generated_summary).strip()
+                generated_summary = generated_summary[:160].strip() if generated_summary else generated_title
 
                 weak_prefixes = ("i ", "i just", "hello", "hi ")
                 if (
-                    short_title.lower() == "new chat"
-                    or short_title.lower().startswith(weak_prefixes)
+                    generated_title.lower() == "new chat"
+                    or generated_title.lower().startswith(weak_prefixes)
+                    or _is_low_signal_user_message(generated_title)
                 ):
-                    short_title = keyword_fallback_title(summary_source, first_user_message)
+                    generated_title = keyword_fallback_title(summary_source, first_user_message)
 
-                short_summary = short_title
+                if (
+                    not generated_summary
+                    or generated_summary.lower() == "new chat"
+                    or _is_low_signal_user_message(generated_summary)
+                ):
+                    generated_summary = generated_title
 
-                return short_title, short_summary
+                return generated_title, generated_summary
             else:
                 print(f"Summary generation failed: {response.text}")
                 fallback = keyword_fallback_title(summary_source, first_user_message)
@@ -320,6 +403,16 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
     # Store user message in PostgreSQL if chat exists
     if db_chat:
         message_repo.create(chat_id=db_chat.id, role="user", content=request.message)
+        # Set an immediate first-pass title from the first user message.
+        if (db_chat.title or "").strip().lower() == "new chat":
+            try:
+                db_messages = message_repo.list_for_chat(db_chat.id)
+                if len(db_messages) == 1 and db_messages[0].role == "user":
+                    initial_title = _build_initial_title_from_first_user_message(request.message)
+                    chat_repo.update_title(db_chat.id, initial_title)
+                    chat_repo.update_summary(db_chat.id, initial_title)
+            except Exception as e:
+                print(f"Error generating initial title: {e}")
 
     # Store user message in session (in-memory)
     session.add_message(role="user", content=request.message)
@@ -366,16 +459,17 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
     if db_chat:
         message_repo.create(chat_id=db_chat.id, role="assistant", content=response_text)
 
-        # Generate summary on server side after saving messages
+        # Refine title/summary once enough context exists (includes assistant responses).
         try:
             db_messages = message_repo.list_for_chat(db_chat.id)
-            messages_dict = [msg.to_dict() for msg in db_messages]
-            title, summary = await generate_summary_from_messages(messages_dict)
+            if len(db_messages) >= SUMMARY_REFINEMENT_MIN_MESSAGES:
+                messages_dict = [msg.to_dict() for msg in db_messages]
+                title, summary = await generate_summary_from_messages(messages_dict)
 
-            if title:
-                chat_repo.update_title(db_chat.id, title)
-            if summary:
-                chat_repo.update_summary(db_chat.id, summary)
+                if title:
+                    chat_repo.update_title(db_chat.id, title)
+                if summary:
+                    chat_repo.update_summary(db_chat.id, summary)
         except Exception as e:
             print(f"Error generating summary: {e}")
 
