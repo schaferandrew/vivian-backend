@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import sys
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -89,6 +90,15 @@ class MCPClient:
         self._request_id += 1
         return self._request_id
 
+    @staticmethod
+    def _json_default(value):
+        """JSON serializer for values frequently found in tool arguments."""
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        if isinstance(value, Path):
+            return str(value)
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
     def _read_response_for_id(self, expected_id: int, context: str) -> dict:
         """Read stdout lines until matching JSON-RPC response ID is found."""
         if not self.process or not self.process.stdout:
@@ -150,7 +160,7 @@ class MCPClient:
         }
 
         try:
-            self.process.stdin.write(json.dumps(request) + "\n")
+            self.process.stdin.write(json.dumps(request, default=self._json_default) + "\n")
             self.process.stdin.flush()
         except Exception as exc:
             raise MCPClientError(f"Failed to send request to MCP server: {exc}") from exc
@@ -167,7 +177,7 @@ class MCPClient:
             "method": method,
             "params": params,
         }
-        self.process.stdin.write(json.dumps(notification) + "\n")
+        self.process.stdin.write(json.dumps(notification, default=self._json_default) + "\n")
         self.process.stdin.flush()
 
     def _initialize_session(self) -> None:
@@ -302,6 +312,12 @@ class MCPClient:
         if not self._initialized:
             raise MCPClientError("MCP server not initialized")
 
+        logger.info(
+            "MCP tool call start. tool=%s arguments=%s",
+            tool_name,
+            arguments,
+        )
+
         try:
             response = self._send_request(
                 "tools/call",
@@ -326,7 +342,15 @@ class MCPClient:
             )
             raise MCPClientError(f"MCP error: {response['error']}")
 
-        return response.get("result", {})
+        result = response.get("result", {})
+        content = result.get("content")
+        content_items = len(content) if isinstance(content, list) else 0
+        logger.info(
+            "MCP tool call success. tool=%s content_items=%s",
+            tool_name,
+            content_items,
+        )
+        return result
 
     @staticmethod
     def _parse_tool_json(result: dict) -> dict:

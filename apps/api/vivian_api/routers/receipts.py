@@ -139,6 +139,8 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
     # Initialize MCP client
     mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
     await mcp_client.start()
+    drive_upload_success = False
+    ledger_update_success = False
     
     try:
         # Non-HSA-eligible receipts should not be persisted.
@@ -152,6 +154,8 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
 
             return ConfirmReceiptResponse(
                 success=True,
+                drive_upload_success=False,
+                ledger_update_success=False,
                 message=(
                     "Receipt marked not HSA-eligible. No Google Drive upload or "
                     "ledger entry was created."
@@ -172,13 +176,19 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
                 request.status.value,
                 upload_result.get("error"),
             )
-            raise HTTPException(
+            return JSONResponse(
                 status_code=502,
-                detail=(
-                    "Could not upload receipt to Google Drive. "
-                    f"{upload_result.get('error', 'Unknown error')}"
-                )
+                content={
+                    "success": False,
+                    "drive_upload_success": drive_upload_success,
+                    "ledger_update_success": ledger_update_success,
+                    "message": (
+                        "Could not upload receipt to Google Drive. "
+                        f"{upload_result.get('error', 'Unknown error')}"
+                    ),
+                },
             )
+        drive_upload_success = True
 
         drive_file_id = upload_result.get("file_id")
         if not drive_file_id:
@@ -188,9 +198,14 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
                 request.status.value,
                 upload_result,
             )
-            raise HTTPException(
+            return JSONResponse(
                 status_code=502,
-                detail="Drive upload did not return a file ID. Please try again."
+                content={
+                    "success": False,
+                    "drive_upload_success": drive_upload_success,
+                    "ledger_update_success": ledger_update_success,
+                    "message": "Drive upload did not return a file ID. Please try again.",
+                },
             )
         
         # Add to ledger
@@ -212,13 +227,19 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
                 request.status.value,
                 ledger_result.get("error"),
             )
-            raise HTTPException(
+            return JSONResponse(
                 status_code=502,
-                detail=(
-                    "Could not update Google Sheet ledger. "
-                    f"{ledger_result.get('error', 'Unknown error')}"
-                )
+                content={
+                    "success": False,
+                    "drive_upload_success": drive_upload_success,
+                    "ledger_update_success": ledger_update_success,
+                    "message": (
+                        "Could not update Google Sheet ledger. "
+                        f"{ledger_result.get('error', 'Unknown error')}"
+                    ),
+                },
             )
+        ledger_update_success = True
         
         # Clean up temp file
         temp_path = Path(request.temp_file_path)
@@ -229,6 +250,8 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
             success=True,
             ledger_entry_id=ledger_result["entry_id"],
             drive_file_id=drive_file_id,
+            drive_upload_success=drive_upload_success,
+            ledger_update_success=ledger_update_success,
             message="Receipt saved successfully"
         )
         
@@ -247,9 +270,14 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
             request.temp_file_path,
             request.status.value,
         )
-        raise HTTPException(
+        return JSONResponse(
             status_code=502,
-            detail=f"Could not save receipt right now. {str(e)}"
+            content={
+                "success": False,
+                "drive_upload_success": drive_upload_success,
+                "ledger_update_success": ledger_update_success,
+                "message": f"Could not save receipt right now. {str(e)}",
+            },
         )
     except Exception:
         logger.exception(
@@ -257,9 +285,14 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
             request.temp_file_path,
             request.status.value,
         )
-        raise HTTPException(
+        return JSONResponse(
             status_code=500,
-            detail="Could not save receipt due to an unexpected server error."
+            content={
+                "success": False,
+                "drive_upload_success": drive_upload_success,
+                "ledger_update_success": ledger_update_success,
+                "message": "Could not save receipt due to an unexpected server error.",
+            },
         )
     finally:
         await mcp_client.stop()

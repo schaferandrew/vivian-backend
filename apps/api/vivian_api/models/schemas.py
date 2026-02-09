@@ -39,6 +39,8 @@ class ConfirmReceiptResponse(BaseModel):
     success: bool
     ledger_entry_id: Optional[str] = None
     drive_file_id: Optional[str] = None
+    drive_upload_success: bool = False
+    ledger_update_success: bool = False
     message: str
 
 
