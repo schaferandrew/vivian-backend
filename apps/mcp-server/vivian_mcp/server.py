@@ -67,9 +67,38 @@ async def list_tools() -> list[Tool]:
                     "drive_file_id": {
                         "type": "string",
                         "description": "Google Drive file ID for the receipt"
+                    },
+                    "check_duplicates": {
+                        "type": "boolean",
+                        "description": "Whether to check for duplicates before appending",
+                        "default": True
+                    },
+                    "force_append": {
+                        "type": "boolean",
+                        "description": "Whether to append even if duplicates are found",
+                        "default": False
                     }
                 },
                 "required": ["expense_json", "reimbursement_status", "drive_file_id"]
+            }
+        ),
+        Tool(
+            name="check_for_duplicates",
+            description="Check if an expense is a duplicate of existing entries in the ledger",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "expense_json": {
+                        "type": "object",
+                        "description": "Expense data to check for duplicates (provider, service_date, amount)"
+                    },
+                    "fuzzy_days": {
+                        "type": "integer",
+                        "description": "Number of days to allow for fuzzy date matching",
+                        "default": 3
+                    }
+                },
+                "required": ["expense_json"]
             }
         ),
         Tool(
@@ -162,7 +191,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = await hsa_tools.append_to_ledger(
                 arguments["expense_json"],
                 arguments["reimbursement_status"],
-                arguments["drive_file_id"]
+                arguments["drive_file_id"],
+                arguments.get("check_duplicates", True),
+                arguments.get("force_append", False)
+            )
+            return [TextContent(type="text", text=result)]
+            
+        elif name == "check_for_duplicates":
+            result = await hsa_tools.check_for_duplicates(
+                arguments["expense_json"],
+                arguments.get("fuzzy_days", 3)
             )
             return [TextContent(type="text", text=result)]
             

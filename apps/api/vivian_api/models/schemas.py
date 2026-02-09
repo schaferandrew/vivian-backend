@@ -37,27 +37,88 @@ class ConfirmReceiptResponse(BaseModel):
     message: str
 
 
-class BulkImportRequest(BaseModel):
-    """Request for bulk import."""
-    directory_path: str
-    status_override: Optional[ReimbursementStatus] = None
-    skip_errors: bool = True
+class DuplicateInfo(BaseModel):
+    """Information about a potential duplicate entry."""
+    entry_id: str
+    provider: str
+    service_date: Optional[str] = None
+    paid_date: Optional[str] = None
+    amount: float
+    hsa_eligible: bool = True
+    status: str
+    reimbursement_date: Optional[str] = None
+    drive_file_id: Optional[str] = None
+    confidence: float = 0
+    match_type: str = Field(..., description="Type of match: 'exact' or 'fuzzy_date'")
+    days_difference: Optional[int] = Field(None, description="Days difference for fuzzy matches")
+
+
+class BulkImportFileStatus(str):
+    """Status of a file in bulk import."""
+    NEW = "new"
+    DUPLICATE_EXACT = "duplicate_exact"
+    DUPLICATE_FUZZY = "duplicate_fuzzy"
+    FLAGGED = "flagged"
+    FAILED = "failed"
+    SKIPPED = "skipped"
 
 
 class BulkImportFileResult(BaseModel):
     """Result for a single file in bulk import."""
     filename: str
-    success: bool
+    status: str = Field(..., description="Status: new, duplicate_exact, duplicate_fuzzy, flagged, failed, skipped")
+    temp_file_path: Optional[str] = None
     expense: Optional[ExpenseSchema] = None
+    confidence: float = 0
+    duplicate_info: Optional[list[DuplicateInfo]] = None
     error: Optional[str] = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class BulkImportSummary(BaseModel):
+    """Summary of bulk import operation."""
+    total_amount: float = 0
+    new_count: int = 0
+    duplicate_count: int = 0
+    flagged_count: int = 0
+    failed_count: int = 0
+    ready_to_import: int = 0
+
+
+class BulkImportRequest(BaseModel):
+    """Request for bulk import."""
+    directory_path: str
+    status_override: Optional[ReimbursementStatus] = None
+    skip_errors: bool = True
+    check_duplicates: bool = True
+    duplicate_action: str = Field(default="flag", description="Action for duplicates: skip, flag, or ask")
 
 
 class BulkImportResponse(BaseModel):
     """Response from bulk import endpoint."""
     total_files: int
-    successful: int
-    failed: int
+    mode: str = Field(..., description="Mode: scan or import")
+    new: list[BulkImportFileResult] = Field(default_factory=list)
+    duplicates: list[BulkImportFileResult] = Field(default_factory=list)
+    flagged: list[BulkImportFileResult] = Field(default_factory=list)
+    failed: list[BulkImportFileResult] = Field(default_factory=list)
+    summary: BulkImportSummary
+
+
+class BulkImportConfirmRequest(BaseModel):
+    """Request to confirm bulk import after review."""
+    temp_file_paths: list[str] = Field(..., description="List of temp file paths to import")
+    status_override: Optional[ReimbursementStatus] = None
+
+
+class BulkImportConfirmResponse(BaseModel):
+    """Response from bulk import confirmation."""
+    success: bool
+    imported_count: int
+    failed_count: int
+    total_amount: float
     results: list[BulkImportFileResult]
+    message: str
 
 
 class UnreimbursedBalanceResponse(BaseModel):

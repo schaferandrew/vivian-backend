@@ -78,13 +78,39 @@ class MCPClient:
         self,
         expense_json: dict,
         status: str,
-        drive_file_id: str
+        drive_file_id: str,
+        check_duplicates: bool = True,
+        force_append: bool = False
     ) -> dict:
         """Append expense to ledger."""
         result = await self.call_tool("append_expense_to_ledger", {
             "expense_json": expense_json,
             "reimbursement_status": status,
-            "drive_file_id": drive_file_id
+            "drive_file_id": drive_file_id,
+            "check_duplicates": check_duplicates,
+            "force_append": force_append
+        })
+        
+        content = result.get("content", [{}])[0].get("text", "{}")
+        return json.loads(content)
+    
+    async def check_for_duplicates(
+        self,
+        expense_json: dict,
+        fuzzy_days: int = 3
+    ) -> dict:
+        """Check for duplicate entries in the ledger.
+        
+        Args:
+            expense_json: Expense data with provider, service_date, amount
+            fuzzy_days: Number of days to allow for fuzzy date matching
+            
+        Returns:
+            Dict with is_duplicate, potential_duplicates, recommendation
+        """
+        result = await self.call_tool("check_for_duplicates", {
+            "expense_json": expense_json,
+            "fuzzy_days": fuzzy_days
         })
         
         content = result.get("content", [{}])[0].get("text", "{}")
