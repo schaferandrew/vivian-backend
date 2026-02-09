@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # Google Drive/Sheets
     drive_root_folder_id: str = ""
     sheets_spreadsheet_id: str = ""
+    sheets_worksheet_name: str = "HSA_Ledger"
     
     # Folders within root
     reimbursed_folder_id: str = ""

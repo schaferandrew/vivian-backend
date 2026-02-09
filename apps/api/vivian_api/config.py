@@ -161,6 +161,7 @@ class Settings(BaseSettings):
     mcp_unreimbursed_folder_id: str = ""
     mcp_not_eligible_folder_id: str = ""
     mcp_sheets_spreadsheet_id: str = ""
+    mcp_sheets_worksheet_name: str = "HSA_Ledger"
     
     class Config:
         env_file = ".env"
