@@ -18,6 +18,7 @@ from vivian_api.chat.message_protocol import (
     ActionPayload, FileUploadPayload
 )
 from vivian_api.config import Settings
+from vivian_api.services.mcp_registry import normalize_enabled_server_ids
 
 settings = Settings()
 
@@ -269,6 +270,22 @@ class ChatHandler:
                     value=session.context.web_search_enabled,
                     success=True,
                     message=f"Web search {'enabled' if session.context.web_search_enabled else 'disabled'}."
+                ).model_dump()
+            )
+            await connection_manager.send_to_session(session.session_id, response)
+        elif setting == "enabled_mcp_servers":
+            requested_ids = value if isinstance(value, list) else []
+            normalized_ids = normalize_enabled_server_ids(requested_ids, settings)
+            session.context.enabled_mcp_servers = normalized_ids
+
+            response = ChatMessage(
+                type=MessageType.SETTINGS_RESPONSE,
+                session_id=session.session_id,
+                payload=SettingsResponsePayload(
+                    setting="enabled_mcp_servers",
+                    value=normalized_ids,
+                    success=True,
+                    message="MCP servers updated.",
                 ).model_dump()
             )
             await connection_manager.send_to_session(session.session_id, response)

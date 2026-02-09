@@ -1,5 +1,6 @@
 """Agent personality and system prompts."""
 
+from datetime import datetime, timezone
 from typing import List
 
 
@@ -113,9 +114,16 @@ Could you double-check these details? You can edit anything that looks off."""
 
 • **Already reimbursed** - I'll mark it as reimbursed
 • **Save for later** - I'll track it as unreimbursed
-• **Not eligible** - This isn't an HSA-eligible expense
 
 Which applies?"""
+
+    NOT_ELIGIBLE_PROMPT = """⚠️ This receipt looks **not HSA-eligible**.
+
+I can:
+• **Ignore it** (no Drive upload and no ledger entry)
+• **Save anyway** if you want to override that decision
+
+What would you like to do?"""
 
     # Success messages
     RECEIPT_SAVED = """✓ **Receipt saved successfully!**
@@ -172,9 +180,29 @@ Would you like to **retry** or **try a different approach**?"""
     PROGRESS_IMPORTING = "📂 Processing file {current} of {total}..."
 
     @classmethod
-    def get_system_prompt(cls) -> str:
-        """Get base system prompt."""
-        return cls.SYSTEM_PROMPT
+    def get_system_prompt(
+        cls,
+        current_date: str | None = None,
+        user_location: str | None = None,
+        enabled_mcp_servers: list[str] | None = None,
+    ) -> str:
+        """Get base system prompt with dynamic runtime context."""
+        date_value = current_date or datetime.now(timezone.utc).date().isoformat()
+        context_lines = [
+            "Runtime context:",
+            f"- Current date (UTC): {date_value}",
+        ]
+        if user_location:
+            context_lines.append(f"- User location: {user_location}")
+        if enabled_mcp_servers is not None:
+            if enabled_mcp_servers:
+                context_lines.append(
+                    "- Enabled MCP servers: " + ", ".join(enabled_mcp_servers)
+                )
+            else:
+                context_lines.append("- Enabled MCP servers: none")
+
+        return f"{cls.SYSTEM_PROMPT}\n\n" + "\n".join(context_lines)
 
     @classmethod
     def format_receipt_details(cls, expense: dict) -> str:

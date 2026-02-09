@@ -1,16 +1,11 @@
 """Receipt upload flow handler."""
 
 import os
-import shutil
-from pathlib import Path
-from typing import Optional
-
 from vivian_api.chat.session import ChatSession, FlowType, FlowStatus
 from vivian_api.chat.connection import connection_manager
 from vivian_api.chat.personality import VivianPersonality
 from vivian_api.services.receipt_parser import OpenRouterService
 from vivian_api.services.mcp_client import MCPClient
-from vivian_shared.models import ReimbursementStatus
 
 
 class ReceiptUploadFlow:
@@ -124,6 +119,23 @@ class ReceiptUploadFlow:
     
     async def _request_confirmation(self, session: ChatSession, parsed_receipt):
         """Request confirmation and status selection."""
+        if not parsed_receipt.expense.hsa_eligible:
+            await connection_manager.send_confirmation(
+                session,
+                prompt_id=f"eligibility_{session.session_id}",
+                message=VivianPersonality.NOT_ELIGIBLE_PROMPT,
+                actions=[
+                    {"id": "ignore_receipt", "label": "Ignore receipt", "style": "secondary"},
+                    {"id": "save_anyway", "label": "Save anyway", "style": "danger"},
+                    {"id": "cancel", "label": "Cancel", "style": "outline"}
+                ],
+                display_data={
+                    "type": "status_selection",
+                    "data": parsed_receipt.model_dump()
+                }
+            )
+            return
+
         details = VivianPersonality.format_receipt_details({
             "provider": parsed_receipt.expense.provider,
             "service_date": parsed_receipt.expense.service_date,
@@ -139,7 +151,7 @@ class ReceiptUploadFlow:
             actions=[
                 {"id": "reimbursed", "label": "Already reimbursed", "style": "primary"},
                 {"id": "unreimbursed", "label": "Save for later", "style": "secondary"},
-                {"id": "not_eligible", "label": "Not eligible", "style": "danger"}
+                {"id": "cancel", "label": "Cancel", "style": "outline"}
             ],
             display_data={
                 "type": "status_selection",
@@ -149,16 +161,30 @@ class ReceiptUploadFlow:
     
     async def handle_action(self, session: ChatSession, action_type: str, action_data: dict):
         """Handle user action from confirmation."""
-        if action_type == "confirm" or action_type in ["reimbursed", "unreimbursed", "not_eligible"]:
+        if action_type == "confirm" or action_type in ["reimbursed", "unreimbursed", "save_anyway"]:
             # Map action to status
             status_map = {
                 "confirm": "unreimbursed",
                 "reimbursed": "reimbursed",
                 "unreimbursed": "unreimbursed",
-                "not_eligible": "not_hsa_eligible"
+                "save_anyway": "unreimbursed"
             }
             status = status_map.get(action_type, "unreimbursed")
+            if action_type == "save_anyway":
+                parsed = session.current_flow.data.parsed_receipt
+                if parsed:
+                    parsed.expense.hsa_eligible = True
             await self._save_receipt(session, status)
+
+        elif action_type == "ignore_receipt":
+            temp_path = session.current_flow.data.upload_temp_path
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+            await connection_manager.send_text(
+                session,
+                "Understood. I ignored this receipt and did not upload it or add it to your ledger."
+            )
+            session.end_flow()
             
         elif action_type == "edit":
             # Handle edit flow (simplified for now)
@@ -189,10 +215,19 @@ class ReceiptUploadFlow:
             VivianPersonality.PROGRESS_UPLOADING_DRIVE
         )
         
+        mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
+        await mcp_client.start()
+
         try:
-            # Initialize MCP client
-            mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
-            await mcp_client.start()
+            if not parsed.expense.hsa_eligible:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                await connection_manager.send_text(
+                    session,
+                    "This receipt is marked not HSA-eligible, so I ignored it and did not save it."
+                )
+                session.end_flow()
+                return
             
             # Upload to Drive
             upload_result = await mcp_client.upload_receipt_to_drive(
@@ -222,8 +257,6 @@ class ReceiptUploadFlow:
             if not ledger_result.get("success"):
                 raise Exception(f"Ledger update failed: {ledger_result.get('error')}")
             
-            await mcp_client.stop()
-            
             # Clean up temp file
             if os.path.exists(temp_path):
                 os.remove(temp_path)
@@ -235,8 +268,7 @@ class ReceiptUploadFlow:
             # Success message
             status_label = {
                 "reimbursed": "Reimbursed",
-                "unreimbursed": "Unreimbursed",
-                "not_hsa_eligible": "Not HSA Eligible"
+                "unreimbursed": "Unreimbursed"
             }.get(status, status)
             
             message = VivianPersonality.RECEIPT_SAVED.format(
@@ -251,6 +283,8 @@ class ReceiptUploadFlow:
             
         except Exception as e:
             await self._handle_save_error(session, str(e))
+        finally:
+            await mcp_client.stop()
     
     async def _handle_parse_error(self, session: ChatSession, error: str):
         """Handle parsing error."""

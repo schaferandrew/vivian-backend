@@ -20,6 +20,11 @@ class ReceiptParseResponse(BaseModel):
     temp_file_path: str
 
 
+class ParseReceiptRequest(BaseModel):
+    """Request to parse a previously uploaded receipt."""
+    temp_file_path: str
+
+
 class ConfirmReceiptRequest(BaseModel):
     """Request to confirm and save a parsed receipt."""
     temp_file_path: str
@@ -32,8 +37,10 @@ class ConfirmReceiptRequest(BaseModel):
 class ConfirmReceiptResponse(BaseModel):
     """Response from confirm receipt endpoint."""
     success: bool
-    ledger_entry_id: str
-    drive_file_id: str
+    ledger_entry_id: Optional[str] = None
+    drive_file_id: Optional[str] = None
+    drive_upload_success: bool = False
+    ledger_update_success: bool = False
     message: str
 
 
