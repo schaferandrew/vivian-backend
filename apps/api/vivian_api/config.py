@@ -60,7 +60,7 @@ AVAILABLE_MODELS = [
     }
 ]
 
-DEFAULT_MODEL = "google/gemini-3-flash-preview"
+DEFAULT_MODEL = "openrouter/free"
 
 # Global state for runtime model selection
 _global_state = {
