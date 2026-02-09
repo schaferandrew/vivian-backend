@@ -20,7 +20,7 @@ Your capabilities:
 - Upload and parse receipt PDFs
 - Track HSA-eligible medical expenses
 - Calculate unreimbursed balances
-- Bulk import receipts from directories
+- Bulk import receipts from browser uploads
 - Store receipts in Google Drive
 - Maintain expense ledger in Google Sheets
 
@@ -49,7 +49,7 @@ Tone and length:
 I can help you:
 • **Upload and track receipts** - Just drag a PDF or say "upload receipt"
 • **Check your HSA balance** - Ask "what's my balance?"
-• **Import multiple receipts** - Say "import all receipts from [folder path]"
+• **Import multiple receipts** - Say "import receipts" and upload multiple files
 
 What would you like to do today?"""
 
@@ -60,7 +60,7 @@ What would you like to do today?"""
 
 **Receipt Management:**
 • `/upload` - Upload a single receipt
-• `/import <path>` - Import all PDFs from a folder (desktop only)
+• `/import` - Bulk import multiple uploaded receipts
 • `/balance` - Check your unreimbursed HSA balance
 
 **General:**
@@ -78,21 +78,13 @@ You can also just chat naturally - I'll figure out what you need!"""
 
 I'll extract the details and save it to your Drive and ledger."""
 
-    BULK_IMPORT_METHOD_PROMPT = """I'd be happy to help you import multiple receipts! 
+    BULK_IMPORT_METHOD_PROMPT = """I'd be happy to help you import multiple receipts.
 
-Which method would you like to use?
+Please upload your receipt PDFs using browser upload (drag and drop or file picker)."""
 
-**A) Desktop import** - If the files are on this computer, I can import directly from a folder path like `/Users/you/Documents/Receipts`
+    BULK_IMPORT_DESKTOP_PROMPT = """Desktop folder-path import is disabled.
 
-**B) Browser upload** - Upload multiple files through your browser
-
-Which works better for you?"""
-
-    BULK_IMPORT_DESKTOP_PROMPT = """Perfect! Please provide the full path to the folder containing your receipts.
-
-For example: `/Users/yourname/Documents/Receipts`
-
-I'll scan for all PDF files and process them for you."""
+Please use browser upload and select multiple receipt PDFs."""
 
     BULK_IMPORT_BROWSER_PROMPT = """Great! Please select all the receipt PDFs you'd like to import.
 
@@ -172,9 +164,26 @@ Would you like to **retry** or **try a different approach**?"""
     PROGRESS_IMPORTING = "📂 Processing file {current} of {total}..."
 
     @classmethod
-    def get_system_prompt(cls) -> str:
-        """Get base system prompt."""
-        return cls.SYSTEM_PROMPT
+    def get_system_prompt(
+        cls,
+        *,
+        current_date: str | None = None,
+        user_location: str | None = None,
+        enabled_mcp_servers: list[str] | None = None,
+    ) -> str:
+        """Get system prompt with optional runtime context."""
+        context_lines: list[str] = []
+        if current_date:
+            context_lines.append(f"Current date: {current_date}")
+        if user_location:
+            context_lines.append(f"User location: {user_location}")
+        if enabled_mcp_servers:
+            context_lines.append(f"Enabled MCP servers: {', '.join(enabled_mcp_servers)}")
+
+        if not context_lines:
+            return cls.SYSTEM_PROMPT
+
+        return f"{cls.SYSTEM_PROMPT}\n\nRuntime context:\n- " + "\n- ".join(context_lines)
 
     @classmethod
     def format_receipt_details(cls, expense: dict) -> str:

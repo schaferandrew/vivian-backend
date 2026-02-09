@@ -13,7 +13,7 @@ from vivian_shared.models import ExpenseSchema
 
 
 class BulkImportFlow:
-    """Handles bulk import flow (desktop and browser methods)."""
+    """Handles bulk import flow (browser upload only)."""
     
     def __init__(self):
         self.parser = OpenRouterService()
@@ -21,96 +21,28 @@ class BulkImportFlow:
     async def start(self, session: ChatSession):
         """Start the bulk import flow."""
         session.start_flow(FlowType.BULK_IMPORT)
-        await connection_manager.send_confirmation(
-            session,
-            prompt_id=f"import_method_{session.session_id}",
-            message=VivianPersonality.BULK_IMPORT_METHOD_PROMPT,
-            actions=[
-                {"id": "desktop", "label": "Desktop import (folder path)", "style": "primary"},
-                {"id": "browser", "label": "Browser upload (drag & drop)", "style": "secondary"}
-            ]
-        )
+        await connection_manager.send_text(session, VivianPersonality.BULK_IMPORT_METHOD_PROMPT)
+        await self.handle_method_selection(session, "browser")
     
     async def handle_method_selection(self, session: ChatSession, method: str):
         """Handle import method selection."""
         if not session.current_flow:
             return
-        
-        session.current_flow.data.import_method = method
+
+        resolved_method = "browser"
+        if method != "browser":
+            await connection_manager.send_text(session, VivianPersonality.BULK_IMPORT_DESKTOP_PROMPT)
+
+        session.current_flow.data.import_method = resolved_method
         session.update_flow_step("method_selected", "completed")
-        
-        if method == "desktop":
-            await connection_manager.send_text(
-                session,
-                VivianPersonality.BULK_IMPORT_DESKTOP_PROMPT
-            )
-            # Wait for user to provide path in next message
-        else:
-            await connection_manager.send_text(
-                session,
-                VivianPersonality.BULK_IMPORT_BROWSER_PROMPT
-            )
-            # Wait for file uploads
+        await connection_manager.send_text(session, VivianPersonality.BULK_IMPORT_BROWSER_PROMPT)
     
     async def handle_desktop_path(self, session: ChatSession, directory_path: str):
         """Handle desktop import with filesystem path."""
-        if not session.current_flow or session.current_flow.data.import_method != "desktop":
+        if not session.current_flow:
             return
-        
-        # Validate path
-        path = Path(directory_path).expanduser().resolve()
-        
-        if not path.exists():
-            await connection_manager.send_error(
-                session,
-                error_id=f"invalid_path_{session.session_id}",
-                category="validation_error",
-                severity="user_fixable",
-                message=f"I couldn't find that folder: {directory_path}\n\nPlease check the path and try again.",
-                recovery_options=[
-                    {"id": "retry_path", "label": "Try a different path"},
-                    {"id": "switch_browser", "label": "Switch to browser upload"}
-                ]
-            )
-            return
-        
-        if not path.is_dir():
-            await connection_manager.send_error(
-                session,
-                error_id=f"not_directory_{session.session_id}",
-                category="validation_error",
-                severity="user_fixable",
-                message=f"That path is not a directory: {directory_path}",
-                recovery_options=[
-                    {"id": "retry_path", "label": "Try again"}
-                ]
-            )
-            return
-        
-        # Find PDF files
-        pdf_files = list(path.glob("*.pdf"))
-        
-        if not pdf_files:
-            await connection_manager.send_text(
-                session,
-                f"I didn't find any PDF files in {directory_path}. Would you like to try a different folder?"
-            )
-            return
-        
-        session.current_flow.data.directory_path = str(path)
-        session.current_flow.data.uploaded_files = [str(f) for f in pdf_files]
-        
-        # Confirm before processing
-        await connection_manager.send_confirmation(
-            session,
-            prompt_id=f"confirm_bulk_{session.session_id}",
-            message=f"I found **{len(pdf_files)} PDF files** in that folder.\n\nHow should I mark these receipts?",
-            actions=[
-                {"id": "all_unreimbursed", "label": "All unreimbursed", "style": "primary"},
-                {"id": "all_reimbursed", "label": "All reimbursed", "style": "secondary"},
-                {"id": "ask_each", "label": "Ask for each one", "style": "secondary"}
-            ]
-        )
+        await connection_manager.send_text(session, VivianPersonality.BULK_IMPORT_DESKTOP_PROMPT)
+        await self.handle_method_selection(session, "browser")
     
     async def handle_browser_files(self, session: ChatSession, file_paths: List[str]):
         """Handle browser file uploads."""

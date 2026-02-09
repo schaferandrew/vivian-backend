@@ -4,16 +4,18 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Body
 from fastapi.responses import JSONResponse
 
 from vivian_api.config import Settings
 from vivian_api.models.schemas import (
     ReceiptUploadResponse,
+    ReceiptParseRequest,
     ReceiptParseResponse,
     ConfirmReceiptRequest,
     ConfirmReceiptResponse,
     BulkImportRequest,
+    BulkImportTempScanRequest,
     BulkImportResponse,
     BulkImportFileResult,
     DuplicateInfo,
@@ -63,7 +65,7 @@ async def upload_receipt(file: UploadFile = File(...)):
 
 
 @router.post("/parse", response_model=ReceiptParseResponse)
-async def parse_receipt(temp_file_path: str):
+async def parse_receipt(request: ReceiptParseRequest = Body(...)):
     """Parse a previously uploaded receipt using OpenRouter.
     
     Returns structured expense data with confidence score.
@@ -71,7 +73,7 @@ async def parse_receipt(temp_file_path: str):
     parser = OpenRouterService()
     
     try:
-        result = await parser.parse_receipt(temp_file_path)
+        result = await parser.parse_receipt(request.temp_file_path)
         
         if not result.get("success"):
             raise HTTPException(
@@ -112,9 +114,10 @@ async def parse_receipt(temp_file_path: str):
         return ReceiptParseResponse(
             parsed_data=parsed_receipt,
             needs_review=needs_review,
-            temp_file_path=temp_file_path
+            temp_file_path=request.temp_file_path
         )
-        
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Parsing failed: {str(e)}")
     finally:
@@ -134,11 +137,9 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
     
     try:
         # Check for duplicates first (if not forcing)
-        duplicate_check = None
         if not request.force:
             expense_dict = request.expense_data.model_dump()
             dup_result = await mcp_client.check_for_duplicates(expense_dict)
-            duplicate_check = dup_result
             
             if dup_result.get("is_duplicate"):
                 return ConfirmReceiptResponse(
@@ -172,8 +173,7 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
         ledger_result = await mcp_client.append_to_ledger(
             expense_dict,
             request.status.value,
-            drive_file_id,
-            check_duplicates=False  # Already checked above
+            drive_file_id
         )
         
         if not ledger_result.get("success"):
@@ -195,6 +195,8 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
             is_duplicate=False
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save receipt: {str(e)}")
     finally:
@@ -248,38 +250,66 @@ async def bulk_import_scan(request: BulkImportRequest):
             summary=BulkImportSummary()
         )
     
+    return await _scan_file_paths(
+        [str(p) for p in receipt_files],
+        skip_errors=request.skip_errors,
+        check_duplicates=request.check_duplicates,
+    )
+
+
+@router.post("/bulk-import/scan-temp", response_model=BulkImportResponse)
+async def bulk_import_scan_temp(request: BulkImportTempScanRequest):
+    """Scan uploaded temp files for parsing and duplicate detection."""
+    if not request.temp_file_paths:
+        return BulkImportResponse(
+            total_files=0,
+            mode="scan",
+            summary=BulkImportSummary(),
+        )
+
+    return await _scan_file_paths(
+        request.temp_file_paths,
+        skip_errors=request.skip_errors,
+        check_duplicates=request.check_duplicates,
+    )
+
+
+async def _scan_file_paths(
+    file_paths: list[str],
+    *,
+    skip_errors: bool,
+    check_duplicates: bool,
+) -> BulkImportResponse:
     parser = OpenRouterService()
     mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
     await mcp_client.start()
-    
-    new_results = []
-    duplicate_results = []
-    flagged_results = []
-    failed_results = []
-    
+
+    new_results: list[BulkImportFileResult] = []
+    duplicate_results: list[BulkImportFileResult] = []
+    flagged_results: list[BulkImportFileResult] = []
+    failed_results: list[BulkImportFileResult] = []
+
     summary = BulkImportSummary()
-    
+
     try:
-        for receipt_file in receipt_files:
+        for file_path in file_paths:
+            receipt_path = Path(file_path)
             try:
-                # Parse receipt
-                parse_result = await parser.parse_receipt(str(receipt_file))
-                
+                parse_result = await parser.parse_receipt(str(receipt_path))
                 if not parse_result.get("success"):
                     failed_results.append(BulkImportFileResult(
-                        filename=receipt_file.name,
+                        filename=receipt_path.name,
+                        temp_file_path=str(receipt_path),
                         status="failed",
-                        error=parse_result.get("error", "Unknown parsing error")
+                        error=parse_result.get("error", "Unknown parsing error"),
                     ))
                     summary.failed_count += 1
                     continue
-                
+
                 parsed = parse_result["parsed_data"]
-                
-                # Calculate confidence
                 confidence = 0.9
-                warnings = []
-                
+                warnings: list[str] = []
+
                 if not parsed.get("provider"):
                     confidence -= 0.2
                     warnings.append("Missing provider")
@@ -289,105 +319,95 @@ async def bulk_import_scan(request: BulkImportRequest):
                 if not parsed.get("amount") or parsed.get("amount") == 0:
                     confidence -= 0.3
                     warnings.append("Missing or zero amount")
-                
+
                 confidence = max(0, confidence)
                 needs_review = confidence < settings.confidence_threshold
-                
+
                 expense = ExpenseSchema(
                     provider=parsed.get("provider", "Unknown Provider"),
                     service_date=parsed.get("service_date"),
                     paid_date=parsed.get("paid_date"),
                     amount=float(parsed.get("amount", 0)),
                     hsa_eligible=parsed.get("hsa_eligible", True),
-                    raw_model_output=parse_result.get("raw_output")
+                    raw_model_output=parse_result.get("raw_output"),
                 )
-                
-                # Check for duplicates if enabled
+
                 duplicate_info = None
                 is_duplicate = False
-                
-                if request.check_duplicates and expense.hsa_eligible:
+                if check_duplicates and expense.hsa_eligible:
                     dup_result = await _check_duplicates(mcp_client, expense)
-                    
                     if dup_result.get("is_duplicate"):
                         is_duplicate = True
                         duplicate_info = dup_result.get("potential_duplicates", [])
-                
-                # Determine status
+
                 if not expense.hsa_eligible:
-                    result = BulkImportFileResult(
-                        filename=receipt_file.name,
+                    failed_results.append(BulkImportFileResult(
+                        filename=receipt_path.name,
+                        temp_file_path=str(receipt_path),
                         status="skipped",
                         expense=expense,
                         confidence=confidence,
-                        warnings=["Not HSA eligible"]
-                    )
-                    failed_results.append(result)
+                        warnings=["Not HSA eligible"],
+                    ))
                     summary.failed_count += 1
-                    
                 elif is_duplicate:
-                    # Check if exact or fuzzy
                     has_exact = any(d.get("match_type") == "exact" for d in (duplicate_info or []))
                     status = "duplicate_exact" if has_exact else "duplicate_fuzzy"
-                    
-                    result = BulkImportFileResult(
-                        filename=receipt_file.name,
+                    duplicate_results.append(BulkImportFileResult(
+                        filename=receipt_path.name,
+                        temp_file_path=str(receipt_path),
                         status=status,
                         expense=expense,
                         confidence=confidence,
-                        duplicate_info=[DuplicateInfo(**d) for d in (duplicate_info or [])]
-                    )
-                    duplicate_results.append(result)
+                        duplicate_info=[DuplicateInfo(**d) for d in (duplicate_info or [])],
+                    ))
                     summary.duplicate_count += 1
                     summary.total_amount += expense.amount
-                    
                 elif needs_review:
-                    result = BulkImportFileResult(
-                        filename=receipt_file.name,
+                    flagged_results.append(BulkImportFileResult(
+                        filename=receipt_path.name,
+                        temp_file_path=str(receipt_path),
                         status="flagged",
                         expense=expense,
                         confidence=confidence,
-                        warnings=warnings
-                    )
-                    flagged_results.append(result)
+                        warnings=warnings,
+                    ))
                     summary.flagged_count += 1
                     summary.total_amount += expense.amount
-                    
+                    summary.ready_to_import += 1
                 else:
-                    result = BulkImportFileResult(
-                        filename=receipt_file.name,
+                    new_results.append(BulkImportFileResult(
+                        filename=receipt_path.name,
+                        temp_file_path=str(receipt_path),
                         status="new",
                         expense=expense,
-                        confidence=confidence
-                    )
-                    new_results.append(result)
+                        confidence=confidence,
+                    ))
                     summary.new_count += 1
                     summary.total_amount += expense.amount
                     summary.ready_to_import += 1
-                    
             except Exception as e:
                 failed_results.append(BulkImportFileResult(
-                    filename=receipt_file.name,
+                    filename=receipt_path.name,
+                    temp_file_path=str(receipt_path),
                     status="failed",
-                    error=str(e)
+                    error=str(e),
                 ))
                 summary.failed_count += 1
-                
-                if not request.skip_errors:
+                if not skip_errors:
                     break
-    
     finally:
         await parser.close()
         await mcp_client.stop()
-    
+
     return BulkImportResponse(
-        total_files=len(receipt_files),
+        total_files=len(file_paths),
         mode="scan",
         new=new_results,
         duplicates=duplicate_results,
         flagged=flagged_results,
         failed=failed_results,
-        summary=summary
+        summary=summary,
     )
 
 
@@ -395,123 +415,240 @@ async def bulk_import_scan(request: BulkImportRequest):
 async def bulk_import_confirm(request: BulkImportConfirmRequest):
     """Confirm and import selected receipts after review.
     
-    Takes a list of temp file paths from the scan phase and imports them
-    to Google Drive and the ledger.
+    Imports selected receipts to Drive and ledger with duplicate checks.
+    Uses MCP bulk tool for per-file upload + batched ledger write.
     """
-    parser = OpenRouterService()
     mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
     await mcp_client.start()
-    
-    imported = 0
-    failed = 0
-    total_amount = 0.0
-    results = []
-    
+
+    legacy_parser = None
     try:
-        for temp_file_path in request.temp_file_paths:
-            try:
-                # Re-parse the receipt
-                parse_result = await parser.parse_receipt(temp_file_path)
-                
+        selected_items = list(request.items)
+
+        # Legacy fallback for old clients that only send temp_file_paths.
+        if not selected_items and request.temp_file_paths:
+            legacy_parser = OpenRouterService()
+            for temp_file_path in request.temp_file_paths:
+                parse_result = await legacy_parser.parse_receipt(temp_file_path)
                 if not parse_result.get("success"):
-                    results.append(BulkImportFileResult(
-                        filename=Path(temp_file_path).name,
-                        status="failed",
-                        error=parse_result.get("error", "Parse failed")
-                    ))
-                    failed += 1
                     continue
-                
                 parsed = parse_result["parsed_data"]
-                expense = ExpenseSchema(
-                    provider=parsed.get("provider", "Unknown"),
-                    service_date=parsed.get("service_date"),
-                    paid_date=parsed.get("paid_date"),
-                    amount=float(parsed.get("amount", 0)),
-                    hsa_eligible=parsed.get("hsa_eligible", True),
-                    raw_model_output=parse_result.get("raw_output")
+                selected_items.append(
+                    {
+                        "temp_file_path": temp_file_path,
+                        "expense_data": ExpenseSchema(
+                            provider=parsed.get("provider", "Unknown"),
+                            service_date=parsed.get("service_date"),
+                            paid_date=parsed.get("paid_date"),
+                            amount=float(parsed.get("amount", 0)),
+                            hsa_eligible=parsed.get("hsa_eligible", True),
+                            raw_model_output=parse_result.get("raw_output"),
+                        ),
+                    }
                 )
-                
-                # Skip non-HSA eligible
-                if not expense.hsa_eligible:
-                    results.append(BulkImportFileResult(
-                        filename=Path(temp_file_path).name,
-                        status="skipped",
-                        expense=expense,
-                        warnings=["Not HSA eligible"]
-                    ))
-                    continue
-                
-                status = request.status_override or ReimbursementStatus.UNREIMBURSED
-                
-                # Upload to Drive
-                upload_result = await mcp_client.upload_receipt_to_drive(
-                    temp_file_path,
-                    status.value
-                )
-                
-                if not upload_result.get("success"):
-                    results.append(BulkImportFileResult(
-                        filename=Path(temp_file_path).name,
-                        status="failed",
-                        expense=expense,
-                        error=f"Drive upload failed: {upload_result.get('error')}"
-                    ))
-                    failed += 1
-                    continue
-                
-                # Add to ledger
-                expense_dict = expense.model_dump()
-                ledger_result = await mcp_client.append_to_ledger(
-                    expense_dict,
-                    status.value,
-                    upload_result["file_id"]
-                )
-                
-                if not ledger_result.get("success"):
-                    results.append(BulkImportFileResult(
-                        filename=Path(temp_file_path).name,
-                        status="failed",
-                        expense=expense,
-                        error=f"Ledger update failed: {ledger_result.get('error')}"
-                    ))
-                    failed += 1
-                    continue
-                
-                results.append(BulkImportFileResult(
+
+        if not selected_items:
+            return BulkImportConfirmResponse(
+                success=False,
+                imported_count=0,
+                failed_count=0,
+                total_amount=0.0,
+                results=[],
+                message="No receipts selected for import",
+            )
+
+        status = request.status_override or ReimbursementStatus.UNREIMBURSED
+        path_to_expense: dict[str, ExpenseSchema] = {}
+        local_results: list[BulkImportFileResult] = []
+        mcp_payload: list[dict] = []
+
+        for item in selected_items:
+            temp_file_path = item["temp_file_path"] if isinstance(item, dict) else item.temp_file_path
+            expense = item["expense_data"] if isinstance(item, dict) else item.expense_data
+
+            path_to_expense[temp_file_path] = expense
+            if not expense.hsa_eligible:
+                local_results.append(BulkImportFileResult(
                     filename=Path(temp_file_path).name,
-                    status="new",
-                    expense=expense
+                    temp_file_path=temp_file_path,
+                    status="skipped",
+                    expense=expense,
+                    warnings=["Not HSA eligible"],
                 ))
-                imported += 1
-                total_amount += expense.amount
-                
-                # Clean up temp file
-                temp_path = Path(temp_file_path)
-                if temp_path.exists():
+                continue
+
+            mcp_payload.append(
+                {
+                    "local_file_path": temp_file_path,
+                    "expense_json": expense.model_dump(mode="json"),
+                    "reimbursement_status": status.value,
+                    "filename": Path(temp_file_path).name,
+                }
+            )
+
+        if mcp_payload:
+            try:
+                mcp_result = await mcp_client.bulk_import_receipts(
+                    mcp_payload,
+                    check_duplicates=True,
+                    force_append=request.force,
+                )
+            except Exception as bulk_error:
+                # Fallback: process each receipt through existing MCP calls.
+                fallback_results: list[dict] = []
+                for payload in mcp_payload:
+                    temp_file_path = payload.get("local_file_path", "")
+                    expense_json = payload.get("expense_json", {})
+                    filename = payload.get("filename") or Path(temp_file_path).name
+                    try:
+                        upload_result = await mcp_client.upload_receipt_to_drive(
+                            temp_file_path,
+                            status.value,
+                            filename=filename,
+                        )
+                        if not upload_result.get("success"):
+                            fallback_results.append(
+                                {
+                                    "filename": filename,
+                                    "local_file_path": temp_file_path,
+                                    "temp_file_path": temp_file_path,
+                                    "status": "failed",
+                                    "error": f"Drive upload failed: {upload_result.get('error')}",
+                                }
+                            )
+                            continue
+
+                        ledger_result = await mcp_client.append_to_ledger(
+                            expense_json,
+                            status.value,
+                            upload_result["file_id"],
+                            force_append=request.force,
+                        )
+                        if not ledger_result.get("success"):
+                            duplicate_check = ledger_result.get("duplicate_check") or {}
+                            if duplicate_check.get("is_duplicate"):
+                                duplicate_info = duplicate_check.get("potential_duplicates", [])
+                                has_exact = any(d.get("match_type") == "exact" for d in duplicate_info)
+                                fallback_results.append(
+                                    {
+                                        "filename": filename,
+                                        "local_file_path": temp_file_path,
+                                        "temp_file_path": temp_file_path,
+                                        "status": "duplicate_exact" if has_exact else "duplicate_fuzzy",
+                                        "duplicate_info": duplicate_info,
+                                        "error": "Duplicate entry detected",
+                                    }
+                                )
+                                continue
+                            fallback_results.append(
+                                {
+                                    "filename": filename,
+                                    "local_file_path": temp_file_path,
+                                    "temp_file_path": temp_file_path,
+                                    "status": "failed",
+                                    "error": f"Ledger update failed: {ledger_result.get('error')}",
+                                }
+                            )
+                            continue
+
+                        fallback_results.append(
+                            {
+                                "filename": filename,
+                                "local_file_path": temp_file_path,
+                                "temp_file_path": temp_file_path,
+                                "status": "imported",
+                                "entry_id": ledger_result.get("entry_id"),
+                                "drive_file_id": upload_result.get("file_id"),
+                            }
+                        )
+                    except Exception as item_error:
+                        fallback_results.append(
+                            {
+                                "filename": filename,
+                                "local_file_path": temp_file_path,
+                                "temp_file_path": temp_file_path,
+                                "status": "failed",
+                                "error": str(item_error),
+                            }
+                        )
+
+                mcp_result = {
+                    "results": fallback_results,
+                    "error": f"MCP bulk tool failed, used fallback path: {str(bulk_error)}",
+                }
+        else:
+            mcp_result = {"results": []}
+
+        mcp_results = mcp_result.get("results", [])
+        if not mcp_results and mcp_result.get("error"):
+            for payload in mcp_payload:
+                temp_file_path = payload.get("local_file_path", "")
+                expense = path_to_expense.get(temp_file_path)
+                local_results.append(
+                    BulkImportFileResult(
+                        filename=payload.get("filename") or Path(temp_file_path).name,
+                        temp_file_path=temp_file_path or None,
+                        status="failed",
+                        expense=expense,
+                        error=str(mcp_result.get("error")),
+                    )
+                )
+            mcp_results = []
+
+        for result in mcp_results:
+            temp_file_path = result.get("temp_file_path") or result.get("local_file_path") or ""
+            expense = path_to_expense.get(temp_file_path)
+
+            raw_status = result.get("status", "failed")
+            if raw_status == "imported":
+                status_label = "new"
+            elif raw_status in {"duplicate_exact", "duplicate_fuzzy"}:
+                status_label = raw_status
+            elif raw_status == "skipped":
+                status_label = "skipped"
+            else:
+                status_label = "failed"
+
+            duplicate_info = None
+            if result.get("duplicate_info"):
+                duplicate_info = [DuplicateInfo(**d) for d in result["duplicate_info"]]
+
+            local_results.append(
+                BulkImportFileResult(
+                    filename=result.get("filename", Path(temp_file_path).name if temp_file_path else "unknown"),
+                    temp_file_path=temp_file_path or None,
+                    status=status_label,
+                    expense=expense,
+                    duplicate_info=duplicate_info,
+                    error=result.get("error"),
+                    warnings=result.get("warnings") or [],
+                )
+            )
+
+            # Clean up imported temp files
+            if status_label == "new" and temp_file_path:
+                temp_path = Path(temp_file_path).resolve()
+                temp_root = get_temp_dir().resolve()
+                if temp_path.exists() and temp_root in temp_path.parents:
                     temp_path.unlink()
-                    
-            except Exception as e:
-                results.append(BulkImportFileResult(
-                    filename=Path(temp_file_path).name,
-                    status="failed",
-                    error=str(e)
-                ))
-                failed += 1
-    
+
+        imported_count = sum(1 for r in local_results if r.status == "new")
+        failed_count = sum(1 for r in local_results if r.status in {"failed", "duplicate_exact", "duplicate_fuzzy"})
+        total_amount = sum(r.expense.amount for r in local_results if r.status == "new" and r.expense is not None)
+
+        message = f"Successfully imported {imported_count} receipts"
+        if failed_count > 0:
+            message += f" ({failed_count} failed)"
+
+        return BulkImportConfirmResponse(
+            success=imported_count > 0,
+            imported_count=imported_count,
+            failed_count=failed_count,
+            total_amount=total_amount,
+            results=local_results,
+            message=message,
+        )
     finally:
-        await parser.close()
+        if legacy_parser is not None:
+            await legacy_parser.close()
         await mcp_client.stop()
-    
-    message = f"Successfully imported {imported} receipts"
-    if failed > 0:
-        message += f" ({failed} failed)"
-    
-    return BulkImportConfirmResponse(
-        success=imported > 0,
-        imported_count=imported,
-        failed_count=failed,
-        total_amount=total_amount,
-        results=results,
-        message=message
-    )

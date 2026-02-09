@@ -152,6 +152,54 @@ async def list_tools() -> list[Tool]:
                 "required": ["directory_path"]
             }
         ),
+        Tool(
+            name="bulk_import_receipts",
+            description="Bulk import parsed receipts: upload files and batch append ledger rows",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "receipts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "local_file_path": {
+                                    "type": "string",
+                                    "description": "Local path to receipt file"
+                                },
+                                "expense_json": {
+                                    "type": "object",
+                                    "description": "Parsed expense payload"
+                                },
+                                "reimbursement_status": {
+                                    "type": "string",
+                                    "enum": ["reimbursed", "unreimbursed", "not_hsa_eligible"],
+                                    "description": "Status/folder for this receipt"
+                                },
+                                "filename": {
+                                    "type": "string",
+                                    "description": "Optional filename for upload"
+                                }
+                            },
+                            "required": ["local_file_path", "expense_json", "reimbursement_status"]
+                        }
+                    },
+                    "check_duplicates": {
+                        "type": "boolean",
+                        "default": True
+                    },
+                    "force_append": {
+                        "type": "boolean",
+                        "default": False
+                    },
+                    "fuzzy_days": {
+                        "type": "integer",
+                        "default": 3
+                    }
+                },
+                "required": ["receipts"]
+            }
+        ),
         # Drive Tools
         Tool(
             name="upload_receipt_to_drive",
@@ -220,6 +268,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = await hsa_tools.bulk_import(
                 arguments["directory_path"],
                 arguments.get("reimbursement_status_override")
+            )
+            return [TextContent(type="text", text=result)]
+
+        elif name == "bulk_import_receipts":
+            result = await hsa_tools.bulk_import_receipts(
+                arguments["receipts"],
+                arguments.get("check_duplicates", True),
+                arguments.get("force_append", False),
+                arguments.get("fuzzy_days", 3),
             )
             return [TextContent(type="text", text=result)]
             

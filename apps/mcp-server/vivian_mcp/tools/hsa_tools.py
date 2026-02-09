@@ -5,20 +5,85 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 
 from vivian_mcp.config import Settings
-from vivian_shared.helpers import (
-    normalize_provider,
-    normalize_title,
-    normalize_header,
-    escape_sheet_title,
-    parse_date,
-    days_between,
-)
+
+try:
+    from vivian_shared.helpers import (
+        normalize_provider,
+        normalize_title,
+        normalize_header,
+        escape_sheet_title,
+        parse_date,
+        days_between,
+    )
+except Exception:
+    # Fallback helpers keep MCP server functional if shared helpers are unavailable.
+    def normalize_provider(provider: str) -> str:
+        if not provider:
+            return ""
+        normalized = provider.lower().strip()
+        suffixes = [
+            r"\s+llc\.?$",
+            r"\s+inc\.?$",
+            r"\s+corp\.?$",
+            r"\s+co\.?$",
+            r"\s+ltd\.?$",
+            r"\s+md\.?$",
+            r"\s+do\.?$",
+            r"\s+dds\.?$",
+            r"\s+dmd\.?$",
+            r"\s+phd\.?$",
+            r"\s+np\.?$",
+            r"\s+pa\.?$",
+            r"\s+rn\.?$",
+        ]
+        for suffix in suffixes:
+            normalized = re.sub(suffix, "", normalized)
+        return " ".join(normalized.split())
+
+    def normalize_title(value: str) -> str:
+        return value.strip().lower().replace(" ", "").replace("_", "")
+
+    def normalize_header(value: str) -> str:
+        return value.strip().lower().replace(" ", "_").replace("-", "_")
+
+    def escape_sheet_title(sheet_title: str) -> str:
+        return sheet_title.replace("'", "''")
+
+    def parse_date(date_str: str):
+        if not date_str:
+            return None
+        formats = [
+            "%Y-%m-%d",
+            "%Y/%m/%d",
+            "%m/%d/%Y",
+            "%m-%d-%Y",
+            "%d/%m/%Y",
+            "%d-%m-%Y",
+            "%b %d, %Y",
+            "%B %d, %Y",
+            "%d %b %Y",
+            "%Y%m%d",
+        ]
+        for fmt in formats:
+            try:
+                return datetime.strptime(str(date_str).strip(), fmt)
+            except ValueError:
+                continue
+        return None
+
+    def days_between(date1: str, date2: str):
+        d1 = parse_date(date1)
+        d2 = parse_date(date2)
+        if not d1 or not d2:
+            return None
+        return abs((d2 - d1).days)
 
 
 class HSAToolManager:
@@ -215,6 +280,123 @@ class HSAToolManager:
             self._sheets_service = build("sheets", "v4", credentials=creds)
             self._drive_service = build("drive", "v3", credentials=creds)
         return self._sheets_service
+
+    def _get_folder_id_for_status(self, status: str) -> str:
+        """Get Drive folder ID for status."""
+        folder_map = {
+            "reimbursed": self.settings.reimbursed_folder_id,
+            "unreimbursed": self.settings.unreimbursed_folder_id,
+            "not_hsa_eligible": self.settings.not_eligible_folder_id,
+        }
+        return folder_map.get(status, self.settings.unreimbursed_folder_id)
+
+    def _upload_receipt_file(
+        self,
+        local_file_path: str,
+        status: str,
+        filename: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Upload one receipt file to Drive."""
+        try:
+            service = self._drive_service
+            if service is None:
+                self._get_sheets_service()
+                service = self._drive_service
+            if service is None:
+                return {"success": False, "error": "Drive service unavailable"}
+
+            file_path = Path(local_file_path)
+            if not file_path.exists():
+                return {"success": False, "error": f"File not found: {local_file_path}"}
+
+            upload_filename = filename or file_path.name
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            name_without_ext = Path(upload_filename).stem
+            ext = Path(upload_filename).suffix
+            final_filename = f"{name_without_ext}_{timestamp}{ext}"
+
+            folder_id = self._get_folder_id_for_status(status)
+            file_metadata = {
+                "name": final_filename,
+                "parents": [folder_id] if folder_id else [],
+            }
+
+            media = MediaFileUpload(str(file_path), resumable=True)
+            created = service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields="id, name, webViewLink",
+            ).execute()
+
+            return {
+                "success": True,
+                "file_id": created.get("id"),
+                "filename": created.get("name"),
+                "web_view_link": created.get("webViewLink"),
+                "folder": status,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _duplicate_info_from_row(self, row: list, match_result: dict) -> dict:
+        """Build duplicate info payload from an existing ledger row."""
+        return {
+            "entry_id": row[0] if len(row) > 0 else "",
+            "provider": row[1] if len(row) > 1 else "",
+            "service_date": row[2] if len(row) > 2 else "",
+            "paid_date": row[3] if len(row) > 3 else "",
+            "amount": float(row[4]) if len(row) > 4 and row[4] not in ("", None) else 0,
+            "hsa_eligible": (
+                row[5].lower() == "true"
+                if len(row) > 5 and isinstance(row[5], str)
+                else bool(row[5]) if len(row) > 5
+                else True
+            ),
+            "status": row[6] if len(row) > 6 else "",
+            "reimbursement_date": row[7] if len(row) > 7 else "",
+            "drive_file_id": row[8] if len(row) > 8 else "",
+            "confidence": float(row[9]) if len(row) > 9 and row[9] not in ("", None) else 0,
+            "match_type": match_result.get("match_type"),
+            "days_difference": match_result.get("days_difference"),
+        }
+
+    def _collect_duplicates(
+        self,
+        expense_json: dict,
+        existing_rows: list[list],
+        fuzzy_days: int = 3,
+    ) -> list[dict]:
+        """Collect duplicate matches against existing rows."""
+        duplicates: list[dict] = []
+        for row in existing_rows:
+            match_result = self._is_duplicate(expense_json, row, fuzzy_days)
+            if match_result.get("is_duplicate"):
+                duplicates.append(self._duplicate_info_from_row(row, match_result))
+        return duplicates
+
+    def _build_ledger_row(
+        self,
+        expense_json: dict,
+        reimbursement_status: str,
+        drive_file_id: str,
+    ) -> tuple[str, list]:
+        """Build one ledger row in A:K order and return (entry_id, row)."""
+        entry_id = str(uuid.uuid4())[:8]
+        created_at = datetime.utcnow().isoformat()
+        row = [
+            entry_id,
+            expense_json.get("provider", ""),
+            expense_json.get("service_date", ""),
+            expense_json.get("paid_date", ""),
+            expense_json.get("amount", 0),
+            expense_json.get("hsa_eligible", True),
+            reimbursement_status,
+            expense_json.get("reimbursement_date", ""),
+            drive_file_id,
+            expense_json.get("confidence", 0),
+            created_at,
+        ]
+        return entry_id, row
     
     async def parse_receipt(self, pdf_path: str) -> str:
         """Parse receipt PDF and return structured data.
@@ -399,6 +581,147 @@ class HSAToolManager:
                 "error": str(e),
                 "entry_appended": False
             })
+
+    async def bulk_import_receipts(
+        self,
+        receipts: list[dict],
+        check_duplicates: bool = True,
+        force_append: bool = False,
+        fuzzy_days: int = 3,
+    ) -> str:
+        """Bulk import parsed receipts with per-file Drive upload and batched ledger append."""
+        try:
+            service = self._get_sheets_service()
+            spreadsheet_id = self.settings.sheets_spreadsheet_id
+            worksheet_title = self._resolve_worksheet_title(service)
+
+            fetch_result = service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=self._range_for_sheet(worksheet_title, "A:K"),
+            ).execute()
+            rows = fetch_result.get("values", [])
+            existing_rows = rows[1:] if len(rows) > 1 else []
+
+            pending_rows: list[list] = []
+            pending_meta: list[dict] = []
+            results: list[dict] = []
+            total_amount = 0.0
+
+            for item in receipts:
+                local_file_path = item.get("local_file_path", "")
+                expense_json = item.get("expense_json") or {}
+                reimbursement_status = item.get("reimbursement_status", "unreimbursed")
+                filename = item.get("filename") or Path(local_file_path).name
+
+                if not local_file_path:
+                    results.append({
+                        "filename": filename or "unknown",
+                        "local_file_path": local_file_path,
+                        "temp_file_path": local_file_path,
+                        "status": "failed",
+                        "error": "Missing local_file_path",
+                    })
+                    continue
+
+                duplicate_info: list[dict] = []
+                if check_duplicates:
+                    duplicate_info = self._collect_duplicates(expense_json, existing_rows, fuzzy_days)
+                    if duplicate_info and not force_append:
+                        has_exact = any(d.get("match_type") == "exact" for d in duplicate_info)
+                        results.append({
+                            "filename": filename,
+                            "local_file_path": local_file_path,
+                            "temp_file_path": local_file_path,
+                            "status": "duplicate_exact" if has_exact else "duplicate_fuzzy",
+                            "duplicate_info": duplicate_info,
+                            "error": "Duplicate entry detected",
+                        })
+                        continue
+
+                upload_result = self._upload_receipt_file(local_file_path, reimbursement_status, filename)
+                if not upload_result.get("success"):
+                    results.append({
+                        "filename": filename,
+                        "local_file_path": local_file_path,
+                        "temp_file_path": local_file_path,
+                        "status": "failed",
+                        "error": f"Drive upload failed: {upload_result.get('error')}",
+                    })
+                    continue
+
+                drive_file_id = upload_result.get("file_id", "")
+                entry_id, row = self._build_ledger_row(expense_json, reimbursement_status, drive_file_id)
+
+                pending_rows.append(row)
+                pending_meta.append(
+                    {
+                        "entry_id": entry_id,
+                        "filename": filename,
+                        "local_file_path": local_file_path,
+                        "temp_file_path": local_file_path,
+                        "drive_file_id": drive_file_id,
+                        "amount": float(expense_json.get("amount", 0) or 0),
+                    }
+                )
+                # Include pending row for duplicate checks within the same batch.
+                existing_rows.append(row)
+
+            if pending_rows:
+                try:
+                    service.spreadsheets().values().append(
+                        spreadsheetId=spreadsheet_id,
+                        range=self._range_for_sheet(worksheet_title, "A:K"),
+                        valueInputOption="USER_ENTERED",
+                        body={"values": pending_rows},
+                    ).execute()
+
+                    for meta in pending_meta:
+                        total_amount += meta["amount"]
+                        results.append(
+                            {
+                                "filename": meta["filename"],
+                                "local_file_path": meta["local_file_path"],
+                                "temp_file_path": meta["temp_file_path"],
+                                "status": "imported",
+                                "entry_id": meta["entry_id"],
+                                "drive_file_id": meta["drive_file_id"],
+                            }
+                        )
+                except Exception as e:
+                    for meta in pending_meta:
+                        results.append(
+                            {
+                                "filename": meta["filename"],
+                                "local_file_path": meta["local_file_path"],
+                                "temp_file_path": meta["temp_file_path"],
+                                "status": "failed",
+                                "error": f"Ledger batch append failed: {str(e)}",
+                                "drive_file_id": meta["drive_file_id"],
+                            }
+                        )
+
+            imported_count = sum(1 for r in results if r.get("status") == "imported")
+            failed_count = sum(1 for r in results if r.get("status") in {"failed", "duplicate_exact", "duplicate_fuzzy"})
+
+            return json.dumps(
+                {
+                    "success": imported_count > 0,
+                    "imported_count": imported_count,
+                    "failed_count": failed_count,
+                    "total_amount": round(total_amount, 2),
+                    "results": results,
+                }
+            )
+        except Exception as e:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": str(e),
+                    "imported_count": 0,
+                    "failed_count": len(receipts),
+                    "results": [],
+                }
+            )
     
     async def update_status(
         self, 

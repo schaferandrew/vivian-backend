@@ -102,6 +102,15 @@ class BulkImportRequest(BaseModel):
     duplicate_action: str = Field(default="flag", description="Action for duplicates: skip, flag, or ask")
 
 
+class BulkImportTempScanRequest(BaseModel):
+    """Request for bulk import scan from uploaded temp files."""
+    temp_file_paths: list[str] = Field(..., description="List of uploaded temp file paths")
+    status_override: Optional[ReimbursementStatus] = None
+    skip_errors: bool = True
+    check_duplicates: bool = True
+    duplicate_action: str = Field(default="flag", description="Action for duplicates: skip, flag, or ask")
+
+
 class BulkImportResponse(BaseModel):
     """Response from bulk import endpoint."""
     total_files: int
@@ -115,8 +124,16 @@ class BulkImportResponse(BaseModel):
 
 class BulkImportConfirmRequest(BaseModel):
     """Request to confirm bulk import after review."""
-    temp_file_paths: list[str] = Field(..., description="List of temp file paths to import")
+    items: list["BulkImportConfirmItem"] = Field(default_factory=list, description="Parsed receipts selected for import")
+    temp_file_paths: list[str] = Field(default_factory=list, description="Legacy list of temp file paths to import")
     status_override: Optional[ReimbursementStatus] = None
+    force: bool = Field(default=False, description="Force import even if duplicates are detected")
+
+
+class BulkImportConfirmItem(BaseModel):
+    """Single parsed item selected for bulk import."""
+    temp_file_path: str
+    expense_data: ExpenseSchema
 
 
 class BulkImportConfirmResponse(BaseModel):

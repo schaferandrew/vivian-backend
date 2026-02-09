@@ -1,8 +1,10 @@
 """Chat WebSocket router."""
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 import httpx
 import re
@@ -13,9 +15,18 @@ from vivian_api.chat.handler import chat_handler
 from vivian_api.chat.message_protocol import ChatMessage
 from vivian_api.chat.personality import VivianPersonality
 from vivian_api.services.llm import get_chat_completion, OpenRouterCreditsError, OpenRouterRateLimitError
-from vivian_api.config import AVAILABLE_MODELS, DEFAULT_MODEL, Settings, check_ollama_status, get_selected_model, set_selected_model
+from vivian_api.config import (
+    AVAILABLE_MODELS,
+    DEFAULT_MODEL,
+    Settings,
+    check_ollama_status,
+    get_selected_model,
+    set_selected_model,
+)
 from vivian_api.db.database import get_db
 from vivian_api.repositories import ChatMessageRepository, ChatRepository
+from vivian_api.services.mcp_client import MCPClient, MCPClientError
+from vivian_api.services.mcp_registry import get_mcp_server_definitions, normalize_enabled_server_ids
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -26,12 +37,14 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     chat_id: str | None = None
     web_search_enabled: bool = False
+    enabled_mcp_servers: list[str] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
     response: str
     session_id: str
     chat_id: str
+    tools_called: list[dict[str, str]] = Field(default_factory=list)
 
 
 class ModelSelectRequest(BaseModel):
@@ -110,6 +123,112 @@ def _build_initial_title_from_first_user_message(message: str) -> str:
     )
 
     return _normalize_title(source, message)
+
+
+def _extract_addition_operands(message: str) -> tuple[float, float] | None:
+    """Extract operands from simple addition prompts like '2+2' or 'add 2 and 2'."""
+    plus_pattern = re.search(r"(-?\d+(?:\.\d+)?)\s*\+\s*(-?\d+(?:\.\d+)?)", message)
+    if plus_pattern:
+        return float(plus_pattern.group(1)), float(plus_pattern.group(2))
+
+    add_pattern = re.search(
+        r"\badd\s+(-?\d+(?:\.\d+)?)\s+(?:and|to)\s+(-?\d+(?:\.\d+)?)\b",
+        message,
+        flags=re.IGNORECASE,
+    )
+    if add_pattern:
+        return float(add_pattern.group(1)), float(add_pattern.group(2))
+
+    return None
+
+
+def _format_number_for_display(value: float) -> str:
+    """Render whole numbers without trailing .0 while preserving decimals."""
+    if float(value).is_integer():
+        return str(int(value))
+    return format(value, "g")
+
+
+async def _try_addition_tool_response(
+    *,
+    message: str,
+    enabled_mcp_servers: list[str],
+) -> tuple[str, list[dict[str, str]]] | None:
+    """Use the test addition MCP tool when the message clearly asks for arithmetic."""
+    lower_message = message.lower()
+    explicit_tool_request = (
+        "addition tool" in lower_message
+        or "mcp-server" in lower_message
+        or "mcp server" in lower_message
+        or "add_numbers" in lower_message
+    )
+
+    if "test_addition" not in enabled_mcp_servers and not explicit_tool_request:
+        return None
+
+    operands = _extract_addition_operands(message)
+    if not operands:
+        return None
+
+    settings_obj = Settings()
+    definitions = get_mcp_server_definitions(settings_obj)
+    definition = definitions.get("test_addition")
+    if not definition or "add_numbers" not in definition.tools:
+        return None
+
+    a, b = operands
+    mcp_client = MCPClient(
+        definition.command,
+        server_path_override=definition.server_path,
+    )
+    await mcp_client.start()
+    try:
+        result = await mcp_client.add_numbers(a, b)
+        display_a = _format_number_for_display(a)
+        display_b = _format_number_for_display(b)
+        if not result.get("success"):
+            error_message = str(result.get("error", "unknown error"))
+            return (
+                f"I tried the addition tool, but it failed: {error_message}",
+                [
+                    {
+                        "server_id": definition.id,
+                        "tool_name": "add_numbers",
+                        "input": f"{display_a} + {display_b}",
+                        "output": f"error: {error_message}",
+                    }
+                ],
+            )
+
+        sum_value = float(result.get("sum", a + b))
+        display_sum = _format_number_for_display(sum_value)
+        return (
+            f"Using your addition tool: {display_a} + {display_b} = {display_sum}",
+            [
+                {
+                    "server_id": definition.id,
+                    "tool_name": "add_numbers",
+                    "input": f"{display_a} + {display_b}",
+                    "output": display_sum,
+                }
+            ],
+        )
+    except MCPClientError as exc:
+        display_a = _format_number_for_display(a)
+        display_b = _format_number_for_display(b)
+        return (
+            f"I tried the addition tool, but it failed: {exc}",
+            [
+                {
+                    "server_id": definition.id,
+                    "tool_name": "add_numbers",
+                    "input": f"{display_a} + {display_b}",
+                    "output": f"error: {exc}",
+                }
+            ],
+        )
+    finally:
+        await mcp_client.stop()
 
 
 async def generate_summary_from_messages(messages: list) -> tuple[str, str]:
@@ -400,6 +519,12 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
     else:
         session = session_manager.create_session()
 
+    session.context.web_search_enabled = bool(request.web_search_enabled)
+    session.context.enabled_mcp_servers = normalize_enabled_server_ids(
+        request.enabled_mcp_servers,
+        settings,
+    )
+
     # Store user message in PostgreSQL if chat exists
     if db_chat:
         message_repo.create(chat_id=db_chat.id, role="user", content=request.message)
@@ -419,45 +544,66 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
 
     # Convert session messages to OpenRouter format; prepend system prompt so model stays in character
     messages = [
-        {"role": "system", "content": VivianPersonality.get_system_prompt()},
+        {
+            "role": "system",
+            "content": VivianPersonality.get_system_prompt(
+                current_date=datetime.now(timezone.utc).date().isoformat(),
+                user_location=settings.user_location or None,
+                enabled_mcp_servers=session.context.enabled_mcp_servers,
+            ),
+        },
         *(
             {"role": msg["role"], "content": msg["content"]}
             for msg in session.messages
         ),
     ]
 
-    # Get response from OpenRouter
-    # Use request's web_search_enabled setting (default False to avoid unexpected costs)
-    try:
-        response_text = await get_chat_completion(messages, web_search_enabled=request.web_search_enabled)
-    except OpenRouterCreditsError as e:
-        # Handle model not found (404) errors vs insufficient credits (402) errors
-        if "Model error" in e.message:
+    tools_called: list[dict[str, str]] = []
+    tool_response = await _try_addition_tool_response(
+        message=request.message,
+        enabled_mcp_servers=session.context.enabled_mcp_servers,
+    )
+    if tool_response:
+        response_text, tools_called = tool_response
+    else:
+        # Get response from OpenRouter
+        # Use request's web_search_enabled setting (default False to avoid unexpected costs)
+        try:
+            response_text = await get_chat_completion(messages, web_search_enabled=request.web_search_enabled)
+        except OpenRouterCreditsError as e:
+            # Handle model not found (404) errors vs insufficient credits (402) errors
+            if "Model error" in e.message:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": "model_not_found", "message": e.message},
+                )
             return JSONResponse(
-                status_code=404,
-                content={"error": "model_not_found", "message": e.message},
+                status_code=402,
+                content={"error": "insufficient_credits", "message": e.message},
             )
-        return JSONResponse(
-            status_code=402,
-            content={"error": "insufficient_credits", "message": e.message},
-        )
-    except OpenRouterRateLimitError as e:
-        return JSONResponse(
-            status_code=429,
-            content={"error": "rate_limit", "message": e.message},
-        )
-    except Exception as e:
-        print(f"Error getting chat completion: {e}")
-        import traceback
-        traceback.print_exc()
-        return JSONResponse(
-            status_code=500,
-            content={"error": "server_error", "message": str(e)},
-        )
+        except OpenRouterRateLimitError as e:
+            return JSONResponse(
+                status_code=429,
+                content={"error": "rate_limit", "message": e.message},
+            )
+        except Exception as e:
+            print(f"Error getting chat completion: {e}")
+            import traceback
+            traceback.print_exc()
+            return JSONResponse(
+                status_code=500,
+                content={"error": "server_error", "message": str(e)},
+            )
 
     # Store assistant response in PostgreSQL if chat exists
+    assistant_metadata = {"tools_called": tools_called} if tools_called else None
     if db_chat:
-        message_repo.create(chat_id=db_chat.id, role="assistant", content=response_text)
+        message_repo.create(
+            chat_id=db_chat.id,
+            role="assistant",
+            content=response_text,
+            metadata=assistant_metadata,
+        )
 
         # Refine title/summary once enough context exists (includes assistant responses).
         try:
@@ -480,6 +626,7 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
         response=response_text,
         session_id=session.session_id,
         chat_id=db_chat.id,
+        tools_called=tools_called,
     )
 
 

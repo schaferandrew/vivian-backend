@@ -1,61 +1,101 @@
 """MCP client service for communicating with MCP server."""
 
-import asyncio
 import json
-import subprocess
-from typing import Optional
+from contextlib import AbstractAsyncContextManager
+from typing import Any, Optional
+
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.types import TextContent
+
+
+class MCPClientError(Exception):
+    """Raised when MCP communication fails."""
 
 
 class MCPClient:
     """Client for communicating with MCP server via stdio."""
     
-    def __init__(self, server_command: list[str]):
+    def __init__(
+        self,
+        server_command: list[str],
+        process_env: Optional[dict[str, str]] = None,
+        server_path_override: Optional[str] = None,
+    ):
         self.server_command = server_command
-        self.process: Optional[subprocess.Popen] = None
+        self.process_env = process_env
+        self.server_path_override = server_path_override
+        self._session: Optional[ClientSession] = None
+        self._stdio_cm: Optional[AbstractAsyncContextManager] = None
+        self._session_started = False
     
     async def start(self):
         """Start the MCP server process."""
-        self.process = subprocess.Popen(
-            self.server_command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1
+        if self._session_started and self._session:
+            return
+        if self.process_env is not None:
+            clean_env = dict(self.process_env)
+        else:
+            # Build fresh MCP env on each start so OAuth changes are picked up.
+            from vivian_api.config import Settings
+            from vivian_api.services.google_integration import build_mcp_env
+
+            clean_env = build_mcp_env(Settings())
+
+        if not self.server_command:
+            raise MCPClientError("MCP server command is empty")
+
+        mcp_cwd = self.server_path_override or "/tmp"
+
+        params = StdioServerParameters(
+            command=self.server_command[0],
+            args=self.server_command[1:],
+            env=clean_env,
+            # Default away from /app/.env unless explicit server path provided.
+            cwd=mcp_cwd,
         )
-        # TODO: Initialize MCP session
+        try:
+            self._stdio_cm = stdio_client(params)
+            read_stream, write_stream = await self._stdio_cm.__aenter__()
+
+            session = ClientSession(read_stream, write_stream)
+            self._session = await session.__aenter__()
+            await self._session.initialize()
+            self._session_started = True
+        except Exception as e:
+            await self.stop()
+            raise MCPClientError(f"Failed to start MCP session: {e}") from e
     
     async def call_tool(self, tool_name: str, arguments: dict) -> dict:
         """Call a tool on the MCP server."""
-        # This is a simplified version - real MCP uses JSON-RPC over stdio
-        # For now, we'll simulate with subprocess calls
-        
-        request = {
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": arguments
-            },
-            "id": 1
-        }
-        
-        if not self.process:
-            raise RuntimeError("MCP server not started")
-        
-        # Send request
-        request_line = json.dumps(request) + "\n"
-        self.process.stdin.write(request_line)
-        self.process.stdin.flush()
-        
-        # Read response
-        response_line = self.process.stdout.readline()
-        response = json.loads(response_line)
-        
-        if "error" in response:
-            raise Exception(f"MCP error: {response['error']}")
-        
-        return response.get("result", {})
+        last_error: Optional[Exception] = None
+        for _ in range(2):
+            try:
+                if not self._session_started or not self._session:
+                    await self.start()
+                if not self._session:
+                    raise MCPClientError("MCP session is unavailable")
+
+                result = await self._session.call_tool(tool_name, arguments or {})
+                content: list[dict[str, Any]] = []
+                for part in result.content:
+                    if isinstance(part, TextContent):
+                        content.append({"type": "text", "text": part.text})
+                    else:
+                        text = getattr(part, "text", None)
+                        if text is not None:
+                            content.append({"type": "text", "text": str(text)})
+                if getattr(result, "isError", False):
+                    text = content[0]["text"] if content else "unknown MCP error"
+                    raise MCPClientError(f"MCP tool '{tool_name}' returned error: {text}")
+
+                return {"content": content}
+            except Exception as e:
+                last_error = e
+                await self.stop()
+                continue
+
+        raise MCPClientError(f"MCP tool call failed after retry ({tool_name}): {last_error}")
     
     async def upload_receipt_to_drive(
         self, 
@@ -64,11 +104,15 @@ class MCPClient:
         filename: Optional[str] = None
     ) -> dict:
         """Upload receipt to Google Drive."""
-        result = await self.call_tool("upload_receipt_to_drive", {
+        payload = {
             "local_file_path": local_file_path,
             "status": status,
-            "filename": filename
-        })
+        }
+        # Keep payload compatible with stricter MCP schemas (no null optional fields).
+        if filename:
+            payload["filename"] = filename
+
+        result = await self.call_tool("upload_receipt_to_drive", payload)
         
         # Parse the text content from MCP response
         content = result.get("content", [{}])[0].get("text", "{}")
@@ -83,13 +127,18 @@ class MCPClient:
         force_append: bool = False
     ) -> dict:
         """Append expense to ledger."""
-        result = await self.call_tool("append_expense_to_ledger", {
+        payload = {
             "expense_json": expense_json,
             "reimbursement_status": status,
             "drive_file_id": drive_file_id,
-            "check_duplicates": check_duplicates,
-            "force_append": force_append
-        })
+        }
+        # Keep payload compatible with stricter/older MCP schemas.
+        if not check_duplicates:
+            payload["check_duplicates"] = False
+        if force_append:
+            payload["force_append"] = True
+
+        result = await self.call_tool("append_expense_to_ledger", payload)
         
         content = result.get("content", [{}])[0].get("text", "{}")
         return json.loads(content)
@@ -108,11 +157,33 @@ class MCPClient:
         Returns:
             Dict with is_duplicate, potential_duplicates, recommendation
         """
-        result = await self.call_tool("check_for_duplicates", {
-            "expense_json": expense_json,
-            "fuzzy_days": fuzzy_days
-        })
+        payload = {"expense_json": expense_json}
+        # Keep payload compatible with stricter/older MCP schemas.
+        if fuzzy_days != 3:
+            payload["fuzzy_days"] = fuzzy_days
+        result = await self.call_tool("check_for_duplicates", payload)
         
+        content = result.get("content", [{}])[0].get("text", "{}")
+        return json.loads(content)
+
+    async def bulk_import_receipts(
+        self,
+        receipts: list[dict],
+        check_duplicates: bool = True,
+        force_append: bool = False,
+        fuzzy_days: int = 3,
+    ) -> dict:
+        """Bulk import parsed receipts: per-file Drive upload + batched ledger write."""
+        payload = {"receipts": receipts}
+        # Keep payload compatible with stricter/older schemas.
+        if not check_duplicates:
+            payload["check_duplicates"] = False
+        if force_append:
+            payload["force_append"] = True
+        if fuzzy_days != 3:
+            payload["fuzzy_days"] = fuzzy_days
+
+        result = await self.call_tool("bulk_import_receipts", payload)
         content = result.get("content", [{}])[0].get("text", "{}")
         return json.loads(content)
     
@@ -139,9 +210,25 @@ class MCPClient:
         result = await self.call_tool("get_unreimbursed_balance", {})
         content = result.get("content", [{}])[0].get("text", "{}")
         return json.loads(content)
+
+    async def add_numbers(self, a: float, b: float) -> dict:
+        """Call test addition MCP tool."""
+        result = await self.call_tool("add_numbers", {"a": a, "b": b})
+        content = result.get("content", [{}])[0].get("text", "{}")
+        return json.loads(content)
     
     async def stop(self):
         """Stop the MCP server process."""
-        if self.process:
-            self.process.terminate()
-            self.process.wait()
+        if self._session:
+            try:
+                await self._session.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._session = None
+        if self._stdio_cm:
+            try:
+                await self._stdio_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._stdio_cm = None
+        self._session_started = False
