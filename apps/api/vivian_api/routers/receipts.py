@@ -12,6 +12,8 @@ from vivian_api.models.schemas import (
     ReceiptUploadResponse,
     ReceiptParseRequest,
     ReceiptParseResponse,
+    CheckDuplicateRequest,
+    CheckDuplicateResponse,
     ConfirmReceiptRequest,
     ConfirmReceiptResponse,
     BulkImportRequest,
@@ -45,12 +47,13 @@ async def upload_receipt(file: UploadFile = File(...)):
     
     Returns a temp file path that can be used for parsing.
     """
-    if not file.filename.endswith(".pdf"):
+    filename = file.filename or ""
+    if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
     
     temp_dir = get_temp_dir()
     session_id = str(uuid.uuid4())[:8]
-    temp_path = temp_dir / f"{session_id}_{file.filename}"
+    temp_path = temp_dir / f"{session_id}_{filename}"
     
     try:
         with open(temp_path, "wb") as buffer:
@@ -102,6 +105,25 @@ async def parse_receipt(request: ReceiptParseRequest = Body(...)):
             hsa_eligible=parsed_data.get("hsa_eligible", True),
             raw_model_output=raw_output
         )
+
+        is_duplicate = False
+        duplicate_info: list[DuplicateInfo] | None = None
+        duplicate_check_error: str | None = None
+        if expense.hsa_eligible:
+            try:
+                mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
+                await mcp_client.start()
+                dup_result = await _check_duplicates(mcp_client, expense)
+                if dup_result.get("is_duplicate"):
+                    is_duplicate = True
+                    duplicate_info = [DuplicateInfo(**d) for d in dup_result.get("potential_duplicates", [])]
+                if dup_result.get("check_error"):
+                    duplicate_check_error = str(dup_result["check_error"])
+            except Exception as dup_error:
+                duplicate_check_error = f"Duplicate check unavailable: {dup_error}"
+            finally:
+                if "mcp_client" in locals():
+                    await mcp_client.stop()
         
         parsed_receipt = ParsedReceipt(
             expense=expense,
@@ -114,7 +136,10 @@ async def parse_receipt(request: ReceiptParseRequest = Body(...)):
         return ReceiptParseResponse(
             parsed_data=parsed_receipt,
             needs_review=needs_review,
-            temp_file_path=request.temp_file_path
+            temp_file_path=request.temp_file_path,
+            is_duplicate=is_duplicate,
+            duplicate_info=duplicate_info,
+            duplicate_check_error=duplicate_check_error,
         )
     except HTTPException:
         raise
@@ -164,7 +189,7 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
         
         drive_file_id = upload_result["file_id"]
         
-        # Add to ledger (with duplicate check disabled since we already checked)
+        # Add to ledger
         expense_dict = request.expense_data.model_dump()
         expense_dict["reimbursement_date"] = (
             request.reimbursement_date.isoformat() if request.reimbursement_date else None
@@ -177,6 +202,22 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
         )
         
         if not ledger_result.get("success"):
+            duplicate_check = ledger_result.get("duplicate_check") or {}
+            duplicate_error = str(ledger_result.get("error") or "").lower()
+
+            # If append step reports duplicate, surface it as a duplicate response
+            # so the client can show skip/override instead of a generic failure.
+            if not request.force and (
+                duplicate_check.get("is_duplicate") or "duplicate" in duplicate_error
+            ):
+                potential_duplicates = duplicate_check.get("potential_duplicates", [])
+                return ConfirmReceiptResponse(
+                    success=False,
+                    message=f"Duplicate detected: {duplicate_check.get('recommendation', 'review')}",
+                    is_duplicate=True,
+                    duplicate_info=[DuplicateInfo(**d) for d in potential_duplicates],
+                )
+
             raise HTTPException(
                 status_code=500,
                 detail=f"Ledger update failed: {ledger_result.get('error')}"
@@ -214,20 +255,57 @@ def _get_receipt_files(directory: Path) -> list[Path]:
 
 async def _check_duplicates(
     mcp_client: MCPClient,
-    expense: ExpenseSchema
+    expense: ExpenseSchema,
+    fuzzy_days: int = 3,
 ) -> dict:
     """Check for duplicate entries in the ledger."""
     try:
         expense_dict = expense.model_dump()
-        result = await mcp_client.check_for_duplicates(expense_dict)
+        result = await mcp_client.check_for_duplicates(expense_dict, fuzzy_days=fuzzy_days)
         return result
-    except Exception:
+    except Exception as e:
         # If duplicate check fails, return empty result (allow import)
         return {
             "is_duplicate": False,
             "potential_duplicates": [],
-            "recommendation": "import"
+            "recommendation": "import",
+            "check_error": str(e),
         }
+
+
+@router.post("/check-duplicate", response_model=CheckDuplicateResponse)
+async def check_duplicate(request: CheckDuplicateRequest):
+    """Check edited expense payload for potential duplicates."""
+    if not request.expense_data.hsa_eligible:
+        return CheckDuplicateResponse(
+            is_duplicate=False,
+            duplicate_info=[],
+            recommendation="import",
+        )
+
+    mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
+    try:
+        await mcp_client.start()
+        dup_result = await _check_duplicates(
+            mcp_client,
+            request.expense_data,
+            fuzzy_days=request.fuzzy_days,
+        )
+        return CheckDuplicateResponse(
+            is_duplicate=bool(dup_result.get("is_duplicate")),
+            duplicate_info=[DuplicateInfo(**d) for d in dup_result.get("potential_duplicates", [])],
+            recommendation=str(dup_result.get("recommendation", "import")),
+            check_error=str(dup_result.get("check_error")) if dup_result.get("check_error") else None,
+        )
+    except Exception as e:
+        return CheckDuplicateResponse(
+            is_duplicate=False,
+            duplicate_info=[],
+            recommendation="import",
+            check_error=f"Duplicate check unavailable: {e}",
+        )
+    finally:
+        await mcp_client.stop()
 
 
 @router.post("/bulk-import/scan", response_model=BulkImportResponse)
@@ -336,6 +414,8 @@ async def _scan_file_paths(
                 is_duplicate = False
                 if check_duplicates and expense.hsa_eligible:
                     dup_result = await _check_duplicates(mcp_client, expense)
+                    if dup_result.get("check_error"):
+                        warnings.append("Duplicate check unavailable")
                     if dup_result.get("is_duplicate"):
                         is_duplicate = True
                         duplicate_info = dup_result.get("potential_duplicates", [])
@@ -457,7 +537,6 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
                 message="No receipts selected for import",
             )
 
-        status = request.status_override or ReimbursementStatus.UNREIMBURSED
         path_to_expense: dict[str, ExpenseSchema] = {}
         local_results: list[BulkImportFileResult] = []
         mcp_payload: list[dict] = []
@@ -465,6 +544,12 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
         for item in selected_items:
             temp_file_path = item["temp_file_path"] if isinstance(item, dict) else item.temp_file_path
             expense = item["expense_data"] if isinstance(item, dict) else item.expense_data
+            item_status = (
+                item.get("status") if isinstance(item, dict) else item.status
+            ) or request.status_override or ReimbursementStatus.UNREIMBURSED
+
+            if isinstance(item_status, str):
+                item_status = ReimbursementStatus(item_status)
 
             path_to_expense[temp_file_path] = expense
             if not expense.hsa_eligible:
@@ -481,7 +566,7 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
                 {
                     "local_file_path": temp_file_path,
                     "expense_json": expense.model_dump(mode="json"),
-                    "reimbursement_status": status.value,
+                    "reimbursement_status": item_status.value,
                     "filename": Path(temp_file_path).name,
                 }
             )
@@ -503,7 +588,7 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
                     try:
                         upload_result = await mcp_client.upload_receipt_to_drive(
                             temp_file_path,
-                            status.value,
+                            payload.get("reimbursement_status", ReimbursementStatus.UNREIMBURSED.value),
                             filename=filename,
                         )
                         if not upload_result.get("success"):
@@ -520,7 +605,7 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
 
                         ledger_result = await mcp_client.append_to_ledger(
                             expense_json,
-                            status.value,
+                            payload.get("reimbursement_status", ReimbursementStatus.UNREIMBURSED.value),
                             upload_result["file_id"],
                             force_append=request.force,
                         )

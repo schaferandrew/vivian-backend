@@ -3,6 +3,7 @@
 import json
 import re
 import uuid
+from difflib import SequenceMatcher
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
@@ -103,6 +104,20 @@ class HSAToolManager:
         "confidence",
         "created_at",
     ]
+    PROVIDER_TOKEN_STOPWORDS = {
+        "inc",
+        "incorporated",
+        "llc",
+        "ltd",
+        "limited",
+        "corp",
+        "corporation",
+        "co",
+        "company",
+        "pllc",
+        "pc",
+        "the",
+    }
     
     def __init__(self):
         self.settings = Settings()
@@ -145,6 +160,84 @@ class HSAToolManager:
             if normalize_title(title) == normalized_preferred:
                 return title
         return None
+
+    def _provider_tokens(self, provider: str) -> list[str]:
+        """Tokenize provider for fuzzy matching."""
+        normalized = normalize_provider(provider)
+        if not normalized:
+            return []
+        normalized = re.sub(r"[^a-z0-9]+", " ", normalized.lower())
+        return [
+            token
+            for token in normalized.split()
+            if token and token not in self.PROVIDER_TOKEN_STOPWORDS
+        ]
+
+    def _provider_match_details(self, new_provider: str, existing_provider: str) -> dict:
+        """Return provider similarity details for duplicate checks."""
+        normalized_new = normalize_provider(new_provider)
+        normalized_existing = normalize_provider(existing_provider)
+
+        if not normalized_new or not normalized_existing:
+            return {
+                "matches": False,
+                "exact": False,
+                "score": 0.0,
+                "reason": "missing_provider",
+            }
+
+        if normalized_new == normalized_existing:
+            return {
+                "matches": True,
+                "exact": True,
+                "score": 1.0,
+                "reason": "provider_exact",
+            }
+
+        new_tokens = self._provider_tokens(normalized_new)
+        existing_tokens = self._provider_tokens(normalized_existing)
+        if new_tokens and existing_tokens:
+            new_set = set(new_tokens)
+            existing_set = set(existing_tokens)
+            token_intersection = len(new_set.intersection(existing_set))
+            token_overlap = token_intersection / max(1, min(len(new_set), len(existing_set)))
+
+            if (new_set <= existing_set or existing_set <= new_set) and token_overlap >= 1.0:
+                return {
+                    "matches": True,
+                    "exact": False,
+                    "score": 0.95,
+                    "reason": "provider_token_subset",
+                }
+
+            token_ratio = SequenceMatcher(
+                None,
+                " ".join(sorted(new_set)),
+                " ".join(sorted(existing_set)),
+            ).ratio()
+            if token_overlap >= 0.8 and token_ratio >= 0.72:
+                return {
+                    "matches": True,
+                    "exact": False,
+                    "score": max(token_overlap, token_ratio),
+                    "reason": "provider_token_overlap",
+                }
+
+        string_ratio = SequenceMatcher(None, normalized_new, normalized_existing).ratio()
+        if string_ratio >= 0.86:
+            return {
+                "matches": True,
+                "exact": False,
+                "score": string_ratio,
+                "reason": "provider_string_similarity",
+            }
+
+        return {
+            "matches": False,
+            "exact": False,
+            "score": string_ratio,
+            "reason": "provider_mismatch",
+        }
 
     def _resolve_worksheet_title(self, service) -> str:
         """Resolve worksheet title dynamically with header validation."""
@@ -214,54 +307,81 @@ class HSAToolManager:
         # Check if row has enough columns
         if len(existing_row) < 5:
             return {"is_duplicate": False, "match_type": None, "days_difference": None}
-        
-        # Normalize and compare provider names (column B = index 1)
-        new_provider = normalize_provider(new_expense.get("provider", ""))
-        existing_provider = normalize_provider(existing_row[1] if len(existing_row) > 1 else "")
-        
-        if not new_provider or not existing_provider:
+
+        # Compare provider names (column B = index 1) with conservative fuzzy matching.
+        provider_match = self._provider_match_details(
+            new_expense.get("provider", ""),
+            existing_row[1] if len(existing_row) > 1 else "",
+        )
+        if not provider_match["matches"]:
             return {"is_duplicate": False, "match_type": None, "days_difference": None}
-        
-        if new_provider != existing_provider:
-            return {"is_duplicate": False, "match_type": None, "days_difference": None}
-        
-        # Compare amounts (column E = index 4) - within $0.01 tolerance
+
+        # Parse dates first (column C = index 2) so we can gate close-amount matching.
+        new_date_str = new_expense.get("service_date", "")
+        existing_date_str = existing_row[2] if len(existing_row) > 2 else ""
+        new_date = parse_date(new_date_str)
+        existing_date = parse_date(existing_date_str)
+        days_diff = abs((new_date - existing_date).days) if new_date and existing_date else None
+
+        # Compare amounts (column E = index 4).
         try:
             new_amount = float(new_expense.get("amount", 0))
             existing_amount = float(existing_row[4] if len(existing_row) > 4 else 0)
-            if abs(new_amount - existing_amount) > 0.01:
-                return {"is_duplicate": False, "match_type": None, "days_difference": None}
+            amount_diff = abs(new_amount - existing_amount)
         except (ValueError, TypeError):
             return {"is_duplicate": False, "match_type": None, "days_difference": None}
-        
-        # Compare dates (column C = index 2)
-        new_date_str = new_expense.get("service_date", "")
-        existing_date_str = existing_row[2] if len(existing_row) > 2 else ""
-        
-        new_date = parse_date(new_date_str)
-        existing_date = parse_date(existing_date_str)
-        
+
+        amount_exact = amount_diff <= 0.01
+        amount_close_tolerance = max(
+            0.5,
+            round(max(abs(new_amount), abs(existing_amount), 1.0) * 0.02, 2),
+        )
+        allow_close_amount = (
+            days_diff is not None
+            and (
+                (provider_match["exact"] and days_diff == 0)
+                or (not provider_match["exact"] and days_diff <= fuzzy_days)
+            )
+        )
+        amount_close = allow_close_amount and amount_diff <= amount_close_tolerance
+        if not amount_exact and not amount_close:
+            return {"is_duplicate": False, "match_type": None, "days_difference": None}
+
         if not new_date or not existing_date:
-            # If we can't parse dates but provider and amount match, consider it a fuzzy match
+            # Without comparable dates, require exact amount match to avoid false positives.
+            if not amount_exact:
+                return {"is_duplicate": False, "match_type": None, "days_difference": None}
             return {
                 "is_duplicate": True, 
                 "match_type": "fuzzy_date", 
                 "days_difference": None,
-                "message": "Provider and amount match, but dates could not be compared"
+                "message": (
+                    "Provider and amount match, but dates could not be compared"
+                    if provider_match["exact"]
+                    else "Similar provider and exact amount match, but dates could not be compared"
+                )
             }
-        
-        days_diff = abs((new_date - existing_date).days)
-        
-        if days_diff == 0:
+
+        if days_diff == 0 and provider_match["exact"] and amount_exact:
             return {"is_duplicate": True, "match_type": "exact", "days_difference": 0}
-        elif days_diff <= fuzzy_days:
+
+        if days_diff <= fuzzy_days:
+            if provider_match["exact"] and amount_exact:
+                message = "Provider and amount match with close service dates"
+            elif provider_match["exact"] and not amount_exact:
+                message = f"Provider/date match and amount differs by ${amount_diff:.2f}"
+            elif not provider_match["exact"] and amount_exact:
+                message = "Similar provider with matching amount and close service dates"
+            else:
+                message = f"Similar provider/date and close amount (difference ${amount_diff:.2f})"
             return {
                 "is_duplicate": True, 
                 "match_type": "fuzzy_date", 
-                "days_difference": days_diff
+                "days_difference": days_diff,
+                "message": message,
             }
-        else:
-            return {"is_duplicate": False, "match_type": None, "days_difference": None}
+
+        return {"is_duplicate": False, "match_type": None, "days_difference": None}
     
     def _get_sheets_service(self):
         """Get Google Sheets service."""
@@ -358,6 +478,7 @@ class HSAToolManager:
             "confidence": float(row[9]) if len(row) > 9 and row[9] not in ("", None) else 0,
             "match_type": match_result.get("match_type"),
             "days_difference": match_result.get("days_difference"),
+            "message": match_result.get("message"),
         }
 
     def _collect_duplicates(
@@ -464,7 +585,8 @@ class HSAToolManager:
                         "drive_file_id": row[8] if len(row) > 8 else "",
                         "confidence": float(row[9]) if len(row) > 9 and row[9] else 0,
                         "match_type": match_result["match_type"],
-                        "days_difference": match_result["days_difference"]
+                        "days_difference": match_result["days_difference"],
+                        "message": match_result.get("message"),
                     }
                     potential_duplicates.append(duplicate_info)
             

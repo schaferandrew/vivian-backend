@@ -18,11 +18,28 @@ class ReceiptParseResponse(BaseModel):
     parsed_data: ParsedReceipt
     needs_review: bool = Field(description="Whether human review is needed")
     temp_file_path: str
+    is_duplicate: bool = Field(default=False, description="Whether parsed receipt appears to be a duplicate")
+    duplicate_info: Optional[list["DuplicateInfo"]] = Field(default=None, description="Potential duplicate matches")
+    duplicate_check_error: Optional[str] = Field(default=None, description="Duplicate check warning if unavailable")
 
 
 class ReceiptParseRequest(BaseModel):
     """Request to parse a previously uploaded receipt."""
     temp_file_path: str
+
+
+class CheckDuplicateRequest(BaseModel):
+    """Request to check one expense payload for duplicates."""
+    expense_data: ExpenseSchema
+    fuzzy_days: int = 3
+
+
+class CheckDuplicateResponse(BaseModel):
+    """Response from duplicate-check endpoint."""
+    is_duplicate: bool
+    duplicate_info: list["DuplicateInfo"] = Field(default_factory=list)
+    recommendation: str = "import"
+    check_error: Optional[str] = None
 
 
 class ConfirmReceiptRequest(BaseModel):
@@ -59,6 +76,7 @@ class DuplicateInfo(BaseModel):
     confidence: float = 0
     match_type: str = Field(..., description="Type of match: 'exact' or 'fuzzy_date'")
     days_difference: Optional[int] = Field(None, description="Days difference for fuzzy matches")
+    message: Optional[str] = Field(None, description="Human-readable duplicate match reason")
 
 
 class BulkImportFileStatus(str):
@@ -134,6 +152,7 @@ class BulkImportConfirmItem(BaseModel):
     """Single parsed item selected for bulk import."""
     temp_file_path: str
     expense_data: ExpenseSchema
+    status: Optional[ReimbursementStatus] = None
 
 
 class BulkImportConfirmResponse(BaseModel):
