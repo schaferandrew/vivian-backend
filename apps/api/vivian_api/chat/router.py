@@ -2,10 +2,11 @@
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 import httpx
 import re
+from datetime import datetime, timezone
 
 from vivian_api.chat.connection import connection_manager
 from vivian_api.chat.session import session_manager
@@ -16,6 +17,7 @@ from vivian_api.services.llm import get_chat_completion, OpenRouterCreditsError,
 from vivian_api.config import AVAILABLE_MODELS, DEFAULT_MODEL, Settings, check_ollama_status, get_selected_model, set_selected_model
 from vivian_api.db.database import get_db
 from vivian_api.repositories import ChatMessageRepository, ChatRepository
+from vivian_api.services.mcp_registry import normalize_enabled_server_ids
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -26,6 +28,7 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     chat_id: str | None = None
     web_search_enabled: bool = False
+    enabled_mcp_servers: list[str] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -415,11 +418,23 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
                 print(f"Error generating initial title: {e}")
 
     # Store user message in session (in-memory)
+    session.context.web_search_enabled = bool(request.web_search_enabled)
+    session.context.enabled_mcp_servers = normalize_enabled_server_ids(
+        request.enabled_mcp_servers,
+        settings,
+    )
     session.add_message(role="user", content=request.message)
 
     # Convert session messages to OpenRouter format; prepend system prompt so model stays in character
     messages = [
-        {"role": "system", "content": VivianPersonality.get_system_prompt()},
+        {
+            "role": "system",
+            "content": VivianPersonality.get_system_prompt(
+                current_date=datetime.now(timezone.utc).date().isoformat(),
+                user_location=settings.user_location or None,
+                enabled_mcp_servers=session.context.enabled_mcp_servers,
+            ),
+        },
         *(
             {"role": msg["role"], "content": msg["content"]}
             for msg in session.messages

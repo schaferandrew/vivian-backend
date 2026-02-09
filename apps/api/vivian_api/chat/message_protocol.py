@@ -98,14 +98,14 @@ class HandshakePayload(BaseModel):
 
 class SettingsPayload(BaseModel):
     """Payload for updating session settings."""
-    setting: Literal["web_search_enabled"]
-    value: bool
+    setting: Literal["web_search_enabled", "enabled_mcp_servers"]
+    value: bool | list[str]
 
 
 class SettingsResponsePayload(BaseModel):
     """Payload for settings update confirmation."""
     setting: str
-    value: bool
+    value: bool | list[str]
     success: bool
     message: Optional[str] = None
 

@@ -15,6 +15,10 @@ RUN pip install -e /packages/shared
 COPY apps/mcp-server /mcp-server
 RUN pip install -e /mcp-server
 
+# Copy and install test MCP server
+COPY apps/test-mcp-server /test-mcp-server
+RUN pip install -e /test-mcp-server
+
 # Copy and install API
 COPY apps/api /app
 RUN pip install -e .

@@ -35,6 +35,8 @@ services:
       - VIVIAN_MCP_GOOGLE_REFRESH_TOKEN=${GOOGLE_REFRESH_TOKEN}
       - VIVIAN_MCP_DRIVE_ROOT_FOLDER_ID=${DRIVE_ROOT_FOLDER_ID}
       - VIVIAN_MCP_SHEETS_SPREADSHEET_ID=${SHEETS_SPREADSHEET_ID}
+      - VIVIAN_API_MCP_SERVER_PATH=/mcp-server
+      - VIVIAN_API_TEST_MCP_SERVER_PATH=/test-mcp-server
       - VIVIAN_API_OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - VIVIAN_API_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/vivian
     volumes:
@@ -42,6 +44,9 @@ services:
       - ./tmp:/tmp/vivian-uploads
       # Mount API code so edits on host are used without rebuilding (uvicorn reload picks up changes)
       - ./apps/api:/app
+      # Mount MCP server source so subprocess cwd always exists in dev.
+      - ./apps/mcp-server:/mcp-server
+      - ./apps/test-mcp-server:/test-mcp-server
     networks:
       - vivian-network
     restart: unless-stopped

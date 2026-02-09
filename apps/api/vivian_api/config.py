@@ -63,7 +63,8 @@ DEFAULT_MODEL = "google/gemini-3-flash-preview"
 
 # Global state for runtime model selection
 _global_state = {
-    "selected_model": DEFAULT_MODEL
+    "selected_model": DEFAULT_MODEL,
+    "enabled_mcp_servers": [],
 }
 
 
@@ -80,6 +81,30 @@ def get_selected_model() -> str:
 def set_selected_model(model_id: str) -> None:
     """Set the selected model."""
     _global_state["selected_model"] = model_id
+
+
+def get_enabled_mcp_servers() -> list[str]:
+    """Get currently enabled MCP server IDs."""
+    enabled = _global_state.get("enabled_mcp_servers")
+    if isinstance(enabled, list) and enabled:
+        return list(dict.fromkeys(str(v) for v in enabled if str(v).strip()))
+
+    defaults = Settings().mcp_default_enabled_servers
+    parsed = [
+        part.strip()
+        for part in defaults.split(",")
+        if part.strip()
+    ]
+    if parsed:
+        _global_state["enabled_mcp_servers"] = parsed
+    return parsed
+
+
+def set_enabled_mcp_servers(server_ids: list[str]) -> None:
+    """Set enabled MCP server IDs globally."""
+    _global_state["enabled_mcp_servers"] = list(
+        dict.fromkeys(str(server_id) for server_id in server_ids if str(server_id).strip())
+    )
 
 
 def get_ollama_base_url() -> str:
@@ -108,6 +133,9 @@ class Settings(BaseSettings):
     
     # MCP Server (path inside Docker container)
     mcp_server_path: str = "/mcp-server"
+    test_mcp_server_path: str = "/test-mcp-server"
+    mcp_default_enabled_servers: str = "vivian_hsa"
+    user_location: str = ""
     
     # Temp storage
     temp_upload_dir: str = "/tmp/vivian-uploads"
