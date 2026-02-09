@@ -20,6 +20,11 @@ class ReceiptParseResponse(BaseModel):
     temp_file_path: str
 
 
+class ReceiptParseRequest(BaseModel):
+    """Request to parse a previously uploaded receipt."""
+    temp_file_path: str
+
+
 class ConfirmReceiptRequest(BaseModel):
     """Request to confirm and save a parsed receipt."""
     temp_file_path: str
@@ -27,14 +32,17 @@ class ConfirmReceiptRequest(BaseModel):
     status: ReimbursementStatus
     reimbursement_date: Optional[date] = None
     notes: Optional[str] = None
+    force: bool = Field(default=False, description="Force import even if duplicates detected")
 
 
 class ConfirmReceiptResponse(BaseModel):
     """Response from confirm receipt endpoint."""
     success: bool
-    ledger_entry_id: str
-    drive_file_id: str
+    ledger_entry_id: Optional[str] = None
+    drive_file_id: Optional[str] = None
     message: str
+    is_duplicate: bool = Field(default=False, description="Whether this receipt is a duplicate")
+    duplicate_info: Optional[list["DuplicateInfo"]] = Field(default=None, description="Details of potential duplicates")
 
 
 class DuplicateInfo(BaseModel):

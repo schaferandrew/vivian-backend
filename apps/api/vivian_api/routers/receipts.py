@@ -126,12 +126,28 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
     """Confirm and save a parsed receipt to Drive and Ledger.
     
     This is the final step after user confirmation/editing.
+    Checks for duplicates before saving.
     """
     # Initialize MCP client
     mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
     await mcp_client.start()
     
     try:
+        # Check for duplicates first (if not forcing)
+        duplicate_check = None
+        if not request.force:
+            expense_dict = request.expense_data.model_dump()
+            dup_result = await mcp_client.check_for_duplicates(expense_dict)
+            duplicate_check = dup_result
+            
+            if dup_result.get("is_duplicate"):
+                return ConfirmReceiptResponse(
+                    success=False,
+                    message=f"Duplicate detected: {dup_result.get('recommendation', 'review')}",
+                    is_duplicate=True,
+                    duplicate_info=[DuplicateInfo(**d) for d in dup_result.get("potential_duplicates", [])]
+                )
+        
         # Upload to Google Drive
         upload_result = await mcp_client.upload_receipt_to_drive(
             request.temp_file_path,
@@ -147,7 +163,7 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
         
         drive_file_id = upload_result["file_id"]
         
-        # Add to ledger
+        # Add to ledger (with duplicate check disabled since we already checked)
         expense_dict = request.expense_data.model_dump()
         expense_dict["reimbursement_date"] = (
             request.reimbursement_date.isoformat() if request.reimbursement_date else None
@@ -156,7 +172,8 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
         ledger_result = await mcp_client.append_to_ledger(
             expense_dict,
             request.status.value,
-            drive_file_id
+            drive_file_id,
+            check_duplicates=False  # Already checked above
         )
         
         if not ledger_result.get("success"):
@@ -174,7 +191,8 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
             success=True,
             ledger_entry_id=ledger_result["entry_id"],
             drive_file_id=drive_file_id,
-            message="Receipt saved successfully"
+            message="Receipt saved successfully",
+            is_duplicate=False
         )
         
     except Exception as e:
