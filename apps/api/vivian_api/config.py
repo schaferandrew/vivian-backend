@@ -118,9 +118,21 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:3001"]
     
+    # Google OAuth settings
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_oauth_redirect_uri: str = ""
+    google_oauth_token_store_path: str = "/tmp/vivian-uploads/google-oauth.json"
+    
+    # MCP Google Drive/Sheets settings
+    mcp_sheets_spreadsheet_id: str = ""
+    mcp_reimbursed_folder_id: str = ""
+    mcp_unreimbursed_folder_id: str = ""
+    
     class Config:
         env_file = ".env"
         env_prefix = "VIVIAN_API_"
+        extra = "ignore"  # Allow extra env vars for flexibility
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
