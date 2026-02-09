@@ -16,6 +16,7 @@ class MCPServerDefinition:
     server_path: str
     default_enabled: bool
     tools: list[str]
+    source: str = "builtin"
 
 
 def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinition]:
@@ -26,7 +27,7 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
             name="Vivian HSA",
             description="Drive + Sheets tools for receipt workflows.",
             command=["python", "-m", "vivian_mcp.server"],
-            server_path=settings.mcp_server_path,
+            server_path=settings.mcp_server_path("mcp-server"),
             default_enabled=True,
             tools=[
                 "upload_receipt_to_drive",
@@ -40,7 +41,7 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
             name="Test Addition",
             description="Minimal MCP server with add_numbers(a, b).",
             command=["python", "-m", "vivian_test_mcp.server"],
-            server_path=settings.test_mcp_server_path,
+            server_path=settings.mcp_server_path("test-mcp-server"),
             default_enabled=False,
             tools=["add_numbers"],
         ),

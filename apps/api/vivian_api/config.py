@@ -1,6 +1,7 @@
 """Vivian API configuration."""
 
 import os
+from pathlib import Path
 from typing import Optional
 import httpx
 from pydantic_settings import BaseSettings
@@ -131,9 +132,8 @@ class Settings(BaseSettings):
     # Database URL (for SQLAlchemy)
     database_url: str = ""
     
-    # MCP Server (path inside Docker container)
-    mcp_server_path: str = "/mcp-server"
-    test_mcp_server_path: str = "/test-mcp-server"
+    # MCP servers root path (built-ins live under this directory)
+    mcp_servers_root_path: str = "/mcp-servers"
     mcp_default_enabled_servers: str = "vivian_hsa"
     user_location: str = ""
     
@@ -175,6 +175,10 @@ class Settings(BaseSettings):
         # Also check for non-prefixed DATABASE_URL
         if "DATABASE_URL" in os.environ and not self.database_url:
             self.database_url = os.environ["DATABASE_URL"]
+
+    def mcp_server_path(self, folder_name: str) -> str:
+        """Resolve MCP server directory by folder name under the root path."""
+        return str(Path(self.mcp_servers_root_path) / folder_name)
 
 
 def check_ollama_status() -> dict:

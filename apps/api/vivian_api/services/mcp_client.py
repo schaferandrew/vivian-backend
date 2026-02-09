@@ -211,7 +211,7 @@ class MCPClient:
         from vivian_api.config import Settings
 
         settings = Settings()
-        configured_path = self.server_path_override or settings.mcp_server_path
+        configured_path = self.server_path_override or settings.mcp_server_path("mcp-server")
         mcp_cwd, checked_paths = self._resolve_mcp_cwd(configured_path)
         if not mcp_cwd:
             self.startup_error = (

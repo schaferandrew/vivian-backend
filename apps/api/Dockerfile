@@ -11,13 +11,13 @@ RUN apt-get update && apt-get install -y \
 COPY packages/shared /packages/shared
 RUN pip install -e /packages/shared
 
-# Copy and install MCP server (API launches this via subprocess)
-COPY apps/mcp-server /mcp-server
-RUN pip install -e /mcp-server
+# Copy and install MCP servers (API launches these via subprocess)
+COPY apps/mcp-server /mcp-servers/mcp-server
+RUN pip install -e /mcp-servers/mcp-server
 
 # Copy and install test MCP server
-COPY apps/test-mcp-server /test-mcp-server
-RUN pip install -e /test-mcp-server
+COPY apps/test-mcp-server /mcp-servers/test-mcp-server
+RUN pip install -e /mcp-servers/test-mcp-server
 
 # Copy and install API
 COPY apps/api /app

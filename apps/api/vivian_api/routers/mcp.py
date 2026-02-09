@@ -20,6 +20,7 @@ class MCPServerInfo(BaseModel):
     tools: list[str]
     default_enabled: bool
     enabled: bool
+    source: str
 
 
 class MCPServersResponse(BaseModel):
@@ -74,6 +75,7 @@ async def list_mcp_servers():
             tools=definition.tools,
             default_enabled=definition.default_enabled,
             enabled=definition.id in enabled_lookup,
+            source=definition.source,
         )
         for definition in definitions.values()
     ]
