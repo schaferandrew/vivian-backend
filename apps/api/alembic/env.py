@@ -12,6 +12,7 @@ from vivian_api.db.database import Base
 
 # Ensure model metadata is loaded before migrations run.
 from vivian_api.models import chat_models  # noqa: F401
+from vivian_api.models import identity_models  # noqa: F401
 
 
 config = context.config
