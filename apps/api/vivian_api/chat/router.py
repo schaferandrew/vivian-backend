@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 import httpx
 import re
+from datetime import datetime, timezone
 
 from vivian_api.chat.connection import connection_manager
 from vivian_api.chat.session import session_manager
@@ -540,6 +541,11 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
                 print(f"Error generating initial title: {e}")
 
     # Store user message in session (in-memory)
+    session.context.web_search_enabled = bool(request.web_search_enabled)
+    session.context.enabled_mcp_servers = normalize_enabled_server_ids(
+        request.enabled_mcp_servers,
+        settings,
+    )
     session.add_message(role="user", content=request.message)
 
     # Convert session messages to OpenRouter format; prepend system prompt so model stays in character
@@ -620,7 +626,7 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
             print(f"Error generating summary: {e}")
 
     # Store assistant response in session (in-memory)
-    session.add_message(role="assistant", content=response_text)
+    session.add_message(role="assistant", content=response_text, metadata=assistant_metadata)
 
     return ChatResponse(
         response=response_text,
