@@ -16,7 +16,8 @@ This project now uses:
 - Alembic config: `apps/api/alembic.ini`
 - Alembic env: `apps/api/alembic/env.py`
 - First migration: `apps/api/alembic/versions/20260208_0001_create_chat_tables.py`
-- Client/home migration: `apps/api/alembic/versions/20260210_0002_create_client_home_tables.py`
+- User/home migration: `apps/api/alembic/versions/20260210_0002_create_client_home_tables.py`
+- Table rename migration: `apps/api/alembic/versions/20260210_0004_rename_clients_to_users.py`
 
 ## Run Migrations
 

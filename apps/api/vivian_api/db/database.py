@@ -35,6 +35,6 @@ def init_db() -> None:
     """Create all tables (development fallback; production should use Alembic)."""
     # Import models so metadata is populated.
     from vivian_api.models.chat_models import Chat, ChatMessage  # noqa: F401
-    from vivian_api.models.identity_models import Client, Home, HomeMembership  # noqa: F401
+    from vivian_api.models.identity_models import Home, HomeMembership, User  # noqa: F401
 
     Base.metadata.create_all(bind=engine)

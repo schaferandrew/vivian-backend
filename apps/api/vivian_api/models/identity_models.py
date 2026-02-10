@@ -21,11 +21,11 @@ from vivian_api.db.database import Base
 
 
 CLIENT_STATUSES = ("active", "disabled", "invited")
-MEMBERSHIP_ROLES = ("owner", "parent", "child", "caretaker", "member")
+MEMBERSHIP_ROLES = ("owner", "parent", "child", "caretaker", "guest", "member")
 
 
 class Home(Base):
-    """Household container shared by one or more clients."""
+    """Household container shared by one or more users."""
 
     __tablename__ = "homes"
 
@@ -47,15 +47,15 @@ class Home(Base):
     )
 
 
-class Client(Base):
-    """Application client/account identity."""
+class User(Base):
+    """Application user/account identity."""
 
-    __tablename__ = "clients"
+    __tablename__ = "users"
     __table_args__ = (
-        UniqueConstraint("email", name="uq_clients_email"),
+        UniqueConstraint("email", name="uq_users_email"),
         CheckConstraint(
             "status IN ('active', 'disabled', 'invited')",
-            name="ck_clients_status",
+            name="ck_users_status",
         ),
     )
 
@@ -81,13 +81,13 @@ class Client(Base):
 
 
 class HomeMembership(Base):
-    """Client-to-home membership with role metadata."""
+    """User-to-home membership with role metadata."""
 
     __tablename__ = "home_memberships"
     __table_args__ = (
         UniqueConstraint("home_id", "client_id", name="uq_home_memberships_home_client"),
         CheckConstraint(
-            "role IN ('owner', 'parent', 'child', 'caretaker', 'member')",
+            "role IN ('owner', 'parent', 'child', 'caretaker', 'guest', 'member')",
             name="ck_home_memberships_role",
         ),
         Index(
@@ -109,7 +109,7 @@ class HomeMembership(Base):
     )
     client_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("clients.id", ondelete="CASCADE"),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -123,4 +123,8 @@ class HomeMembership(Base):
     )
 
     home: Mapped[Home] = relationship(back_populates="memberships")
-    client: Mapped[Client] = relationship(back_populates="memberships")
+    client: Mapped[User] = relationship(back_populates="memberships")
+
+
+# Backward-compatible alias while references migrate from Client -> User.
+Client = User
