@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vivian-backend"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "apps/test-mcp-server/tests",
+    # Add more as they exist: "apps/api/tests", "packages/shared/tests"
+]
+asyncio_mode = "auto"
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+pythonpath = [
+    "apps/test-mcp-server",
+    # "apps/api",  # uncomment when ready
+]

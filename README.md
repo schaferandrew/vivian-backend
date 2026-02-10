@@ -101,6 +101,37 @@ python -m vivian_api.main
 curl http://localhost:8000/health
 ```
 
+### Running Tests
+
+Tests are organized by app. Currently, MCP server tests are configured.
+
+**Option 1: Full path (no activation needed)**
+```bash
+apps/test-mcp-server/venv/bin/pytest apps/test-mcp-server/tests/ -v
+```
+
+**Option 2: Activate venv manually**
+```bash
+cd apps/test-mcp-server
+source venv/bin/activate
+pytest tests/ -v
+```
+
+**Option 3: Using .envrc (Recommended)**
+```bash
+# First time only: set up venv
+cd apps/test-mcp-server
+python3 -m venv venv
+source venv/bin/activate
+pip install -e ".[test]"
+
+# Then from project root, use the helper
+source .envrc
+test-mcp  # Runs only MCP tests
+# or
+pytest  # Runs all tests
+```
+
 ### Database Migrations (Alembic)
 
 ```bash

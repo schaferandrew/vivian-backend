@@ -1,0 +1,17 @@
+{
+    "python.testing.pytestEnabled": true,
+    "python.testing.pytestArgs": [
+        "apps/test-mcp-server/tests"
+    ],
+    "python.testing.pytestPath": "apps/test-mcp-server/venv/bin/pytest",
+    "python.testing.unittestEnabled": false,
+    "python.testing.autoTestDiscoverOnSaveEnabled": true,
+    "python.defaultInterpreterPath": "${workspaceFolder}/apps/test-mcp-server/venv/bin/python",
+    "python.analysis.extraPaths": [
+        "apps/test-mcp-server"
+    ],
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter",
+        "editor.formatOnSave": true
+    }
+}
