@@ -67,9 +67,38 @@ async def list_tools() -> list[Tool]:
                     "drive_file_id": {
                         "type": "string",
                         "description": "Google Drive file ID for the receipt"
+                    },
+                    "check_duplicates": {
+                        "type": "boolean",
+                        "description": "Whether to check for duplicates before appending",
+                        "default": True
+                    },
+                    "force_append": {
+                        "type": "boolean",
+                        "description": "Whether to append even if duplicates are found",
+                        "default": False
                     }
                 },
                 "required": ["expense_json", "reimbursement_status", "drive_file_id"]
+            }
+        ),
+        Tool(
+            name="check_for_duplicates",
+            description="Check if an expense is a duplicate of existing entries in the ledger",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "expense_json": {
+                        "type": "object",
+                        "description": "Expense data to check for duplicates (provider, service_date, amount)"
+                    },
+                    "fuzzy_days": {
+                        "type": "integer",
+                        "description": "Number of days to allow for fuzzy date matching",
+                        "default": 3
+                    }
+                },
+                "required": ["expense_json"]
             }
         ),
         Tool(
@@ -123,6 +152,54 @@ async def list_tools() -> list[Tool]:
                 "required": ["directory_path"]
             }
         ),
+        Tool(
+            name="bulk_import_receipts",
+            description="Bulk import parsed receipts: upload files and batch append ledger rows",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "receipts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "local_file_path": {
+                                    "type": "string",
+                                    "description": "Local path to receipt file"
+                                },
+                                "expense_json": {
+                                    "type": "object",
+                                    "description": "Parsed expense payload"
+                                },
+                                "reimbursement_status": {
+                                    "type": "string",
+                                    "enum": ["reimbursed", "unreimbursed", "not_hsa_eligible"],
+                                    "description": "Status/folder for this receipt"
+                                },
+                                "filename": {
+                                    "type": "string",
+                                    "description": "Optional filename for upload"
+                                }
+                            },
+                            "required": ["local_file_path", "expense_json", "reimbursement_status"]
+                        }
+                    },
+                    "check_duplicates": {
+                        "type": "boolean",
+                        "default": True
+                    },
+                    "force_append": {
+                        "type": "boolean",
+                        "default": False
+                    },
+                    "fuzzy_days": {
+                        "type": "integer",
+                        "default": 3
+                    }
+                },
+                "required": ["receipts"]
+            }
+        ),
         # Drive Tools
         Tool(
             name="upload_receipt_to_drive",
@@ -162,7 +239,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = await hsa_tools.append_to_ledger(
                 arguments["expense_json"],
                 arguments["reimbursement_status"],
-                arguments["drive_file_id"]
+                arguments["drive_file_id"],
+                arguments.get("check_duplicates", True),
+                arguments.get("force_append", False)
+            )
+            return [TextContent(type="text", text=result)]
+            
+        elif name == "check_for_duplicates":
+            result = await hsa_tools.check_for_duplicates(
+                arguments["expense_json"],
+                arguments.get("fuzzy_days", 3)
             )
             return [TextContent(type="text", text=result)]
             
@@ -182,6 +268,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = await hsa_tools.bulk_import(
                 arguments["directory_path"],
                 arguments.get("reimbursement_status_override")
+            )
+            return [TextContent(type="text", text=result)]
+
+        elif name == "bulk_import_receipts":
+            result = await hsa_tools.bulk_import_receipts(
+                arguments["receipts"],
+                arguments.get("check_duplicates", True),
+                arguments.get("force_append", False),
+                arguments.get("fuzzy_days", 3),
             )
             return [TextContent(type="text", text=result)]
             

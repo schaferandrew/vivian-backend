@@ -2,8 +2,8 @@
 
 import logging
 
-from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from vivian_api.config import Settings, get_enabled_mcp_servers, set_enabled_mcp_servers
 from vivian_api.services.mcp_client import MCPClient, MCPClientError
@@ -119,29 +119,11 @@ async def test_addition_server(request: MCPAddTestRequest):
         request.a,
         request.b,
     )
-    print(
-        f"MCP addition test requested: server_id={request.server_id} a={request.a} b={request.b}"
-    )
     await mcp_client.start()
     try:
         result = await mcp_client.add_numbers(request.a, request.b)
         if not result.get("success"):
             raise HTTPException(status_code=502, detail=result.get("error", "Addition test failed"))
-
-        logger.info(
-            "MCP addition test success. server_id=%s a=%s b=%s sum=%s",
-            request.server_id,
-            result.get("a", request.a),
-            result.get("b", request.b),
-            result.get("sum"),
-        )
-        print(
-            "MCP addition test success: "
-            f"server_id={request.server_id} "
-            f"a={result.get('a', request.a)} "
-            f"b={result.get('b', request.b)} "
-            f"sum={result.get('sum')}"
-        )
 
         return MCPAddTestResponse(
             server_id=request.server_id,
@@ -150,12 +132,6 @@ async def test_addition_server(request: MCPAddTestRequest):
             sum=float(result.get("sum", request.a + request.b)),
         )
     except MCPClientError as exc:
-        logger.error(
-            "MCP addition test failed. server_id=%s error=%s",
-            request.server_id,
-            exc,
-        )
-        print(f"MCP addition test failed: server_id={request.server_id} error={exc}")
         raise HTTPException(status_code=502, detail=f"MCP test call failed: {exc}") from exc
     finally:
         await mcp_client.stop()

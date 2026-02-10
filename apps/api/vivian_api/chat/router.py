@@ -1,5 +1,7 @@
 """Chat WebSocket router."""
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -14,7 +16,14 @@ from vivian_api.chat.handler import chat_handler
 from vivian_api.chat.message_protocol import ChatMessage
 from vivian_api.chat.personality import VivianPersonality
 from vivian_api.services.llm import get_chat_completion, OpenRouterCreditsError, OpenRouterRateLimitError
-from vivian_api.config import AVAILABLE_MODELS, DEFAULT_MODEL, Settings, check_ollama_status, get_selected_model, set_selected_model
+from vivian_api.config import (
+    AVAILABLE_MODELS,
+    DEFAULT_MODEL,
+    Settings,
+    check_ollama_status,
+    get_selected_model,
+    set_selected_model,
+)
 from vivian_api.db.database import get_db
 from vivian_api.repositories import ChatMessageRepository, ChatRepository
 from vivian_api.services.mcp_client import MCPClient, MCPClientError
@@ -510,6 +519,12 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
             session = session_manager.create_session(session_id=request.session_id)
     else:
         session = session_manager.create_session()
+
+    session.context.web_search_enabled = bool(request.web_search_enabled)
+    session.context.enabled_mcp_servers = normalize_enabled_server_ids(
+        request.enabled_mcp_servers,
+        settings,
+    )
 
     # Store user message in PostgreSQL if chat exists
     if db_chat:

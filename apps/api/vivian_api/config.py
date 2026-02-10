@@ -60,7 +60,7 @@ AVAILABLE_MODELS = [
     }
 ]
 
-DEFAULT_MODEL = "openrouter/free"
+DEFAULT_MODEL = "google/gemini-3-flash-preview"
 
 # Global state for runtime model selection
 _global_state = {
@@ -91,11 +91,7 @@ def get_enabled_mcp_servers() -> list[str]:
         return list(dict.fromkeys(str(v) for v in enabled if str(v).strip()))
 
     defaults = Settings().mcp_default_enabled_servers
-    parsed = [
-        part.strip()
-        for part in defaults.split(",")
-        if part.strip()
-    ]
+    parsed = [part.strip() for part in defaults.split(",") if part.strip()]
     if parsed:
         _global_state["enabled_mcp_servers"] = parsed
     return parsed
@@ -132,9 +128,13 @@ class Settings(BaseSettings):
     # Database URL (for SQLAlchemy)
     database_url: str = ""
     
-    # MCP servers root path (built-ins live under this directory)
+    # MCP server package path used by receipt workflows.
+    mcp_server_path: str = "/mcp-server"
+    # MCP servers root path for registry-discovered servers.
     mcp_servers_root_path: str = "/mcp-servers"
     mcp_default_enabled_servers: str = "vivian_hsa"
+    # JSON array for future custom server definitions.
+    mcp_custom_servers_json: str = ""
     user_location: str = ""
     
     # Temp storage
@@ -145,28 +145,28 @@ class Settings(BaseSettings):
     
     # CORS
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:3001"]
-
-    # Google OAuth for settings-driven Drive/Sheets connection
+    
+    # Google OAuth settings
     google_client_id: str = ""
     google_client_secret: str = ""
     google_refresh_token: str = ""
     google_oauth_redirect_uri: str = "http://localhost:8000/api/v1/integrations/google/oauth/callback"
     google_oauth_success_redirect: str = "http://localhost:3000/settings?google=connected"
     google_oauth_error_redirect: str = "http://localhost:3000/settings?google=error"
-    google_oauth_token_store_path: str = "/tmp/vivian-google-oauth.json"
-
-    # MCP target IDs (needed once connected)
+    google_oauth_token_store_path: str = "/tmp/vivian-uploads/google-oauth.json"
+    
+    # MCP Google Drive/Sheets settings
     mcp_drive_root_folder_id: str = ""
+    mcp_sheets_spreadsheet_id: str = ""
+    mcp_sheets_worksheet_name: str = "HSA_Ledger"
     mcp_reimbursed_folder_id: str = ""
     mcp_unreimbursed_folder_id: str = ""
     mcp_not_eligible_folder_id: str = ""
-    mcp_sheets_spreadsheet_id: str = ""
-    mcp_sheets_worksheet_name: str = "HSA_Ledger"
     
     class Config:
         env_file = ".env"
         env_prefix = "VIVIAN_API_"
-        extra = "ignore"
+        extra = "ignore"  # Allow extra env vars for flexibility
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -177,8 +177,23 @@ class Settings(BaseSettings):
         if "DATABASE_URL" in os.environ and not self.database_url:
             self.database_url = os.environ["DATABASE_URL"]
 
-    def mcp_server_path(self, folder_name: str) -> str:
-        """Resolve MCP server directory by folder name under the root path."""
+        # Backward-compatible fallback: accept MCP-prefixed vars directly.
+        fallback_env = {
+            "mcp_drive_root_folder_id": "VIVIAN_MCP_DRIVE_ROOT_FOLDER_ID",
+            "mcp_reimbursed_folder_id": "VIVIAN_MCP_REIMBURSED_FOLDER_ID",
+            "mcp_unreimbursed_folder_id": "VIVIAN_MCP_UNREIMBURSED_FOLDER_ID",
+            "mcp_not_eligible_folder_id": "VIVIAN_MCP_NOT_ELIGIBLE_FOLDER_ID",
+            "mcp_sheets_spreadsheet_id": "VIVIAN_MCP_SHEETS_SPREADSHEET_ID",
+            "mcp_sheets_worksheet_name": "VIVIAN_MCP_SHEETS_WORKSHEET_NAME",
+        }
+        for field_name, env_name in fallback_env.items():
+            if not getattr(self, field_name):
+                value = os.environ.get(env_name, "")
+                if value:
+                    setattr(self, field_name, value)
+
+    def resolve_mcp_server_path(self, folder_name: str) -> str:
+        """Resolve MCP server directory by folder name under root path."""
         return str(Path(self.mcp_servers_root_path) / folder_name)
 
 
