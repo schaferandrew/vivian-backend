@@ -200,6 +200,36 @@ Notes:
 - `--password` is only applied for role `owner`; non-owner roles are always saved with empty password hash.
 - Hash format uses PBKDF2-SHA256 with per-password random salt.
 
+### Interactive DB Shell (Rails Console Style)
+
+Use the preloaded shell to inspect/update identity tables without typing imports:
+
+```bash
+db-shell
+```
+
+Equivalent direct command (without alias):
+
+```bash
+docker compose exec api python scripts/db_shell.py
+```
+
+Preloaded symbols:
+- `db` (SQLAlchemy session)
+- `select` (SQLAlchemy query helper)
+- `User`, `Home`, `HomeMembership`, `AuthSession`
+- `MEMBERSHIP_ROLES`
+- `user_by_email(email)`, `memberships_for_user(user)`
+
+Example:
+
+```python
+user = user_by_email("owner@schafer-hause.com")
+membership = memberships_for_user(user)[0]
+membership.role = "owner"
+db.commit()
+```
+
 ### Using Docker
 
 ```bash
