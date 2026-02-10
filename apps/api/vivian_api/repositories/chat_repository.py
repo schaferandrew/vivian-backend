@@ -8,6 +8,7 @@ import uuid
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from fastapi.encoders import jsonable_encoder
 
 from vivian_api.models.chat_models import Chat, ChatMessage
 
@@ -112,7 +113,7 @@ class ChatMessageRepository:
             chat_id=chat_id,
             role=role,
             content=content,
-            extra_data=metadata,
+            extra_data=jsonable_encoder(metadata) if metadata is not None else None,
         )
         self.db.add(message)
         self.chat_repo.touch(chat)
