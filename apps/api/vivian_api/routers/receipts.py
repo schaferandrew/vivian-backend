@@ -4,9 +4,10 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Body
+from fastapi import APIRouter, UploadFile, File, HTTPException, Body, Depends
 from fastapi.responses import JSONResponse
 
+from vivian_api.auth.dependencies import get_current_user_context
 from vivian_api.config import Settings
 from vivian_api.models.schemas import (
     ReceiptUploadResponse,
@@ -30,7 +31,11 @@ from vivian_api.services.mcp_client import MCPClient
 from vivian_shared.models import ParsedReceipt, ExpenseSchema, ReimbursementStatus
 
 
-router = APIRouter(prefix="/receipts", tags=["receipts"])
+router = APIRouter(
+    prefix="/receipts",
+    tags=["receipts"],
+    dependencies=[Depends(get_current_user_context)],
+)
 settings = Settings()
 
 

@@ -24,6 +24,7 @@ from vivian_api.config import (
     get_selected_model,
     set_selected_model,
 )
+from vivian_api.auth.dependencies import CurrentUserContext, get_current_user_context
 from vivian_api.db.database import get_db
 from vivian_api.repositories import ChatMessageRepository, ChatRepository
 from vivian_api.services.mcp_client import MCPClient, MCPClientError
@@ -405,7 +406,9 @@ SUMMARY: <summary>"""
 
 
 @router.get("/models")
-async def list_models():
+async def list_models(
+    _current_user: CurrentUserContext = Depends(get_current_user_context),
+):
     """List available OpenRouter models with provider status."""
     ollama_status = check_ollama_status()
     
@@ -436,7 +439,10 @@ async def list_models():
 
 
 @router.post("/models/select")
-async def select_model(request: ModelSelectRequest):
+async def select_model(
+    request: ModelSelectRequest,
+    _current_user: CurrentUserContext = Depends(get_current_user_context),
+):
     """Change the active model (in-memory)."""
     ollama_status = check_ollama_status()
     
@@ -459,7 +465,9 @@ async def select_model(request: ModelSelectRequest):
 
 
 @router.post("/sessions")
-async def create_session():
+async def create_session(
+    _current_user: CurrentUserContext = Depends(get_current_user_context),
+):
     """Create a new chat session."""
     session = session_manager.create_session()
     return JSONResponse({
@@ -470,7 +478,10 @@ async def create_session():
 
 
 @router.delete("/sessions/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(
+    session_id: str,
+    _current_user: CurrentUserContext = Depends(get_current_user_context),
+):
     """Delete a chat session."""
     if session_manager.delete_session(session_id):
         return JSONResponse({
@@ -481,7 +492,10 @@ async def delete_session(session_id: str):
 
 
 @router.get("/sessions/{session_id}")
-async def get_session(session_id: str):
+async def get_session(
+    session_id: str,
+    _current_user: CurrentUserContext = Depends(get_current_user_context),
+):
     """Get session info."""
     session = session_manager.get_session(session_id)
     if not session:
@@ -498,7 +512,11 @@ async def get_session(session_id: str):
 
 
 @router.post("/message", response_model=ChatResponse)
-async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
+async def chat_message(
+    request: ChatRequest,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
     """HTTP endpoint for chat messages using OpenRouter."""
     chat_repo = ChatRepository(db)
     message_repo = ChatMessageRepository(db)
@@ -509,8 +527,14 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
         db_chat = chat_repo.get(request.chat_id)
         if not db_chat:
             raise HTTPException(status_code=404, detail="Chat not found")
+        if db_chat.user_id != current_user.user.id:
+            raise HTTPException(status_code=404, detail="Chat not found")
     else:
-        db_chat = chat_repo.create(title="New Chat", model=get_selected_model())
+        db_chat = chat_repo.create(
+            user_id=current_user.user.id,
+            title="New Chat",
+            model=get_selected_model(),
+        )
 
     # Get or create session (in-memory)
     if request.session_id:

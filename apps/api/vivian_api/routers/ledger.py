@@ -1,12 +1,17 @@
 """Ledger and balance router."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from vivian_api.auth.dependencies import get_current_user_context
 from vivian_api.models.schemas import UnreimbursedBalanceResponse
 from vivian_api.services.mcp_client import MCPClient
 
 
-router = APIRouter(prefix="/ledger", tags=["ledger"])
+router = APIRouter(
+    prefix="/ledger",
+    tags=["ledger"],
+    dependencies=[Depends(get_current_user_context)],
+)
 
 
 @router.get("/balance/unreimbursed", response_model=UnreimbursedBalanceResponse)
