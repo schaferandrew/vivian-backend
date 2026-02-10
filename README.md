@@ -150,6 +150,56 @@ alembic -c alembic.ini upgrade head
 For a quick walkthrough of models/repositories/migrations, see:
 `docs/DATABASE_TOUR.md`
 
+### Seed Identity Data (Home + Users + Memberships)
+
+Use the seed utility to create or update a test home and related users.
+The script uses `find_or_create` behavior for users/memberships.
+Each run always creates a new `home` row.
+
+Recommended (uses API container environment):
+
+```bash
+seed-id \
+  --home-name "Demo Home" \
+  --timezone "America/Chicago" \
+  --client "owner@example.com:owner:default" \
+  --client "parent@example.com:parent" \
+  --client "child@example.com:child" \
+  --password "owner@example.com:ChangeMe123!"
+```
+
+Equivalent direct command (without alias):
+
+```bash
+docker compose exec -T api python scripts/seed_identity.py \
+  --home-name "Demo Home" \
+  --timezone "America/Chicago" \
+  --client "owner@example.com:owner:default" \
+  --client "parent@example.com:parent" \
+  --client "child@example.com:child" \
+  --password "owner@example.com:ChangeMe123!"
+```
+
+Auto-create one member for each role:
+
+```bash
+seed-id \
+  --home-name "Demo Home" \
+  --timezone "America/Chicago" \
+  --seed-all-roles \
+  --default-email-domain "demo.local"
+```
+
+Notes:
+- Membership roles: `owner`, `parent`, `child`, `caretaker`, `guest`, `member`.
+- `--client` format is `email:role[:default]`.
+- If you omit `--client`, the script auto-seeds one user for each role.
+- `--seed-all-roles` can be combined with `--client`; duplicate email+role pairs are deduped.
+- Home names are not deduped; duplicate names are allowed.
+- Seeded memberships are marked `is_default_home=true` for all seeded users.
+- `--password` is only applied for role `owner`; non-owner roles are always saved with empty password hash.
+- Hash format uses PBKDF2-SHA256 with per-password random salt.
+
 ### Using Docker
 
 ```bash
