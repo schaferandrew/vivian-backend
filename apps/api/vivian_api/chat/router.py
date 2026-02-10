@@ -655,7 +655,7 @@ async def chat_message(
         assistant_metadata_payload["tools_called"] = tools_called
     if document_workflows:
         assistant_metadata_payload["document_workflows"] = [
-            workflow.model_dump() for workflow in document_workflows
+            workflow.model_dump(mode="json") for workflow in document_workflows
         ]
     assistant_metadata = assistant_metadata_payload or None
     if db_chat:

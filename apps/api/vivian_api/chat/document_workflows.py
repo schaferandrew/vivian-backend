@@ -197,7 +197,7 @@ async def _run_hsa_receipt_workflow(
             message=message,
             temp_file_path=attachment.temp_file_path,
             filename=attachment.filename,
-            parsed_data=parsed_receipt.model_dump(),
+            parsed_data=parsed_receipt.model_dump(mode="json"),
             is_duplicate=is_duplicate,
             duplicate_info=duplicate_info,
             duplicate_check_error=duplicate_check_error,
