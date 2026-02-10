@@ -2,15 +2,24 @@
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from vivian_api.auth.dependencies import (
+    CurrentUserContext,
+    get_current_user_context,
+    require_roles,
+)
 from vivian_api.config import Settings, get_enabled_mcp_servers, set_enabled_mcp_servers
 from vivian_api.services.mcp_client import MCPClient, MCPClientError
 from vivian_api.services.mcp_registry import get_mcp_server_definitions, normalize_enabled_server_ids
 
 
-router = APIRouter(prefix="/mcp", tags=["mcp"])
+router = APIRouter(
+    prefix="/mcp",
+    tags=["mcp"],
+    dependencies=[Depends(get_current_user_context)],
+)
 logger = logging.getLogger(__name__)
 
 
@@ -86,7 +95,10 @@ async def list_mcp_servers():
 
 
 @router.post("/servers/enabled", response_model=MCPEnabledUpdateResponse)
-async def update_enabled_mcp_servers(request: MCPEnabledUpdateRequest):
+async def update_enabled_mcp_servers(
+    request: MCPEnabledUpdateRequest,
+    _current_user: CurrentUserContext = Depends(require_roles("owner", "parent")),
+):
     """Update globally enabled MCP server IDs."""
     settings = Settings()
     normalized_ids = normalize_enabled_server_ids(request.enabled_server_ids, settings)

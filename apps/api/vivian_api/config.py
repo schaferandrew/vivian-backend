@@ -127,6 +127,12 @@ class Settings(BaseSettings):
     
     # Database URL (for SQLAlchemy)
     database_url: str = ""
+
+    # Authentication
+    auth_jwt_secret: str = "dev-change-me"
+    auth_jwt_algorithm: str = "HS256"
+    auth_access_token_minutes: int = 15
+    auth_refresh_token_days: int = 30
     
     # MCP server package path used by receipt workflows.
     mcp_server_path: str = "/mcp-server"

@@ -7,10 +7,11 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
+from vivian_api.auth.dependencies import get_current_user_context
 from vivian_api.config import Settings
 from vivian_api.services.google_integration import (
     apply_google_credentials_to_process_env,
@@ -23,7 +24,11 @@ from vivian_api.services.google_integration import (
 )
 
 
-router = APIRouter(prefix="/integrations", tags=["integrations"])
+router = APIRouter(
+    prefix="/integrations",
+    tags=["integrations"],
+    dependencies=[Depends(get_current_user_context)],
+)
 settings = Settings()
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"

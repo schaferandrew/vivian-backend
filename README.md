@@ -200,6 +200,31 @@ Notes:
 - `--password` is only applied for role `owner`; non-owner roles are always saved with empty password hash.
 - Hash format uses PBKDF2-SHA256 with per-password random salt.
 
+### Authentication Configuration
+
+Set these API env vars (`apps/api/.env`):
+
+- `VIVIAN_API_AUTH_JWT_SECRET`: JWT signing secret (required outside local dev)
+- `VIVIAN_API_AUTH_JWT_ALGORITHM`: JWT algorithm (default `HS256`)
+- `VIVIAN_API_AUTH_ACCESS_TOKEN_MINUTES`: access token TTL (default `15`)
+- `VIVIAN_API_AUTH_REFRESH_TOKEN_DAYS`: refresh session TTL (default `30`)
+
+### Authentication Flow
+
+Auth endpoints are under `/api/v1/auth`:
+
+- `POST /auth/login` with `{ email, password }` returns `{ access_token, refresh_token }`
+- `POST /auth/refresh` with `{ refresh_token }` rotates the refresh token and returns a new pair
+- `POST /auth/logout` with `{ refresh_token }` revokes the active refresh session
+- `GET /auth/me` with bearer access token returns user + default home + memberships
+
+Session persistence:
+
+- Refresh sessions are stored in `auth_sessions` with hashed refresh token, expiry, and optional user-agent/IP.
+- Refresh rotation revokes prior refresh token record.
+- Protected routes now include these prefixes: `/api/v1/receipts/*`, `/api/v1/ledger/*`, `/api/v1/mcp/*`, `/api/v1/integrations/*`, `/api/v1/chat/*` (HTTP), and `/api/v1/chats/*`.
+- `owner`/`parent` is required for MCP enabled-server updates (`POST /api/v1/mcp/servers/enabled`).
+
 ### Using Docker
 
 ```bash
@@ -207,6 +232,13 @@ docker-compose up -d
 ```
 
 ## API Endpoints
+
+### Auth
+
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/refresh`
+- `POST /api/v1/auth/logout`
+- `GET /api/v1/auth/me`
 
 ### Receipts
 

@@ -16,10 +16,10 @@ Primary shared rule files:
 
 ## Code Review Policy
 
-**NEVER push code changes without explicit user approval.**
+Agents may push to feature branches and open pull requests without explicit approval when all of the following are true:
 
-- Create feature branches and make commits locally
-- Stage changes with `git add` and commit with `git commit`
-- **Wait for user review** before pushing: `git push`
-- Only push when the user explicitly says to "commit and push" or "push the changes"
-- This applies to all branches including feature branches
+- The agent is confident the change is correct.
+- Relevant tests/checks pass (or the best available checks pass when full test execution is unavailable).
+- Behavior has been verified to the best available degree (manual/API validation as appropriate).
+
+If confidence is low, validation is incomplete, or important checks fail, pause and ask for user guidance before pushing.

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
 
+from vivian_api.auth.dependencies import CurrentUserContext, get_current_user_context
 from vivian_api.db.database import get_db
 from vivian_api.repositories import ChatMessageRepository, ChatRepository
 from vivian_api.schemas import chat_schemas
@@ -16,10 +17,15 @@ router = APIRouter(prefix="/chats", tags=["chats"])
 async def list_chats(
     limit: int = 50,
     offset: int = 0,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
     db: Session = Depends(get_db)
 ):
     """List all chats for the user."""
-    chats = ChatRepository(db).list_for_user(limit=limit, offset=offset)
+    chats = ChatRepository(db).list_for_user(
+        user_id=current_user.user.id,
+        limit=limit,
+        offset=offset,
+    )
     total = len(chats)
     return {"chats": chats, "total": total}
 
@@ -27,18 +33,24 @@ async def list_chats(
 @router.post("/", response_model=chat_schemas.ChatResponse, status_code=status.HTTP_201_CREATED)
 async def create_chat(
     chat: chat_schemas.ChatCreate = None,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
     db: Session = Depends(get_db)
 ):
     """Create a new chat."""
     if chat is None:
         chat = chat_schemas.ChatCreate()
-    db_chat = ChatRepository(db).create(title=chat.title, model=chat.model)
+    db_chat = ChatRepository(db).create(
+        user_id=current_user.user.id,
+        title=chat.title,
+        model=chat.model,
+    )
     return db_chat
 
 
 @router.get("/{chat_id}")
 async def get_chat(
     chat_id: str,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
     db: Session = Depends(get_db)
 ):
     """Get a chat with all its messages."""
@@ -46,6 +58,8 @@ async def get_chat(
     message_repo = ChatMessageRepository(db)
     db_chat = chat_repo.get(chat_id)
     if not db_chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if db_chat.user_id != current_user.user.id:
         raise HTTPException(status_code=404, detail="Chat not found")
 
     messages = message_repo.list_for_chat(chat_id)
@@ -75,10 +89,15 @@ async def get_chat(
 @router.delete("/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_chat(
     chat_id: str,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
     db: Session = Depends(get_db)
 ):
     """Delete a chat."""
-    if not ChatRepository(db).delete(chat_id):
+    chat_repo = ChatRepository(db)
+    chat = chat_repo.get(chat_id)
+    if not chat or chat.user_id != current_user.user.id:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if not chat_repo.delete(chat_id):
         raise HTTPException(status_code=404, detail="Chat not found")
 
 
@@ -86,9 +105,13 @@ async def delete_chat(
 async def update_chat_title(
     chat_id: str,
     request: chat_schemas.UpdateTitleRequest,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
     db: Session = Depends(get_db)
 ):
     """Update chat title."""
+    chat = ChatRepository(db).get(chat_id)
+    if not chat or chat.user_id != current_user.user.id:
+        raise HTTPException(status_code=404, detail="Chat not found")
     db_chat = ChatRepository(db).update_title(chat_id, request.title)
     if not db_chat:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -99,6 +122,7 @@ async def update_chat_title(
 async def add_message(
     chat_id: str,
     message: chat_schemas.ChatMessageCreate,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
     db: Session = Depends(get_db)
 ):
     """Add a message to a chat."""
@@ -106,6 +130,8 @@ async def add_message(
     message_repo = ChatMessageRepository(db)
     db_chat = chat_repo.get(chat_id)
     if not db_chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if db_chat.user_id != current_user.user.id:
         raise HTTPException(status_code=404, detail="Chat not found")
 
     db_message = message_repo.create(
@@ -120,6 +146,7 @@ async def add_message(
 @router.post("/{chat_id}/generate-summary", response_model=chat_schemas.GenerateSummaryResponse)
 async def generate_summary(
     chat_id: str,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
     db: Session = Depends(get_db)
 ):
     """Generate and save a summary/title for a chat."""
@@ -127,6 +154,8 @@ async def generate_summary(
     message_repo = ChatMessageRepository(db)
     db_chat = chat_repo.get(chat_id)
     if not db_chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if db_chat.user_id != current_user.user.id:
         raise HTTPException(status_code=404, detail="Chat not found")
 
     messages = message_repo.list_for_chat(chat_id)
@@ -146,6 +175,7 @@ async def generate_summary(
 @router.get("/{chat_id}/messages", response_model=List[chat_schemas.ChatMessageResponse])
 async def get_messages(
     chat_id: str,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
     db: Session = Depends(get_db)
 ):
     """Get all messages for a chat."""
@@ -153,6 +183,8 @@ async def get_messages(
     message_repo = ChatMessageRepository(db)
     db_chat = chat_repo.get(chat_id)
     if not db_chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if db_chat.user_id != current_user.user.id:
         raise HTTPException(status_code=404, detail="Chat not found")
 
     messages = message_repo.list_for_chat(chat_id)
