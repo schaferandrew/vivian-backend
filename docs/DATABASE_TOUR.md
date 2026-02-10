@@ -10,11 +10,13 @@ This project now uses:
 
 - ORM base/session: `apps/api/vivian_api/db/database.py`
 - Typed models: `apps/api/vivian_api/models/chat_models.py`
+- Typed models: `apps/api/vivian_api/models/identity_models.py`
 - Repositories: `apps/api/vivian_api/repositories/chat_repository.py`
 - CRUD compatibility facade: `apps/api/vivian_api/crud/chat_crud.py`
 - Alembic config: `apps/api/alembic.ini`
 - Alembic env: `apps/api/alembic/env.py`
 - First migration: `apps/api/alembic/versions/20260208_0001_create_chat_tables.py`
+- Client/home migration: `apps/api/alembic/versions/20260210_0002_create_client_home_tables.py`
 
 ## Run Migrations
 
