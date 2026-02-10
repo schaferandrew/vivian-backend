@@ -80,6 +80,7 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
             tools=[
                 "upload_receipt_to_drive",
                 "append_expense_to_ledger",
+                "check_for_duplicates",
                 "update_expense_status",
                 "get_unreimbursed_balance",
                 "bulk_import_receipts",
