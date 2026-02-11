@@ -32,7 +32,7 @@ services:
     environment:
       - VIVIAN_API_OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - VIVIAN_API_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/vivian
-      - VIVIAN_API_ENCRYPTION_KEY=9hNX2Mm7i3WKSnkcUIB6McfsHFe9r47LHKXaz/4cLPk=
+      - VIVIAN_API_ENCRYPTION_KEY=${VIVIAN_API_ENCRYPTION_KEY}
     volumes:
       # Writable by container user (UID 1000); ensure host ./tmp is owned by 1000 or world-writable
       - ./tmp:/tmp/vivian-uploads
