@@ -134,6 +134,29 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="read_ledger_entries",
+            description="Read HSA ledger entries with optional filtering by year and status",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "year": {
+                        "type": "integer",
+                        "description": "Optional year to filter entries (e.g., 2025)"
+                    },
+                    "status_filter": {
+                        "type": "string",
+                        "enum": ["reimbursed", "unreimbursed", "not_hsa_eligible"],
+                        "description": "Optional status to filter entries"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of entries to return",
+                        "default": 1000
+                    }
+                }
+            }
+        ),
+        Tool(
             name="bulk_import_receipts_from_directory",
             description="Bulk import all PDF receipts from a directory",
             inputSchema={
@@ -263,7 +286,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name == "get_unreimbursed_balance":
             result = await hsa_tools.get_unreimbursed_balance()
             return [TextContent(type="text", text=result)]
-            
+
+        elif name == "read_ledger_entries":
+            result = await hsa_tools.read_ledger_entries(
+                year=arguments.get("year"),
+                status_filter=arguments.get("status_filter"),
+                limit=arguments.get("limit", 1000)
+            )
+            return [TextContent(type="text", text=result)]
+
         elif name == "bulk_import_receipts_from_directory":
             result = await hsa_tools.bulk_import(
                 arguments["directory_path"],
