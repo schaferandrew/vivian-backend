@@ -19,10 +19,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Note: homes.id is String(36), not UUID
     op.create_table(
         "mcp_server_settings",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
-        sa.Column("home_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("homes.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("id", sa.String(36), primary_key=True, server_default=sa.text("gen_random_uuid()::text")),
+        sa.Column("home_id", sa.String(36), sa.ForeignKey("homes.id", ondelete="CASCADE"), nullable=False),
         sa.Column("mcp_server_id", sa.String(length=100), nullable=False),
         sa.Column("settings_json", postgresql.JSONB(), server_default=sa.text("'{}'"), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("NOW()"), nullable=False),

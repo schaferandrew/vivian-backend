@@ -19,13 +19,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Note: homes.id and users.id are String(36), not UUID
     op.create_table(
         "home_connections",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
-        sa.Column("home_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("homes.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("id", sa.String(36), primary_key=True, server_default=sa.text("gen_random_uuid()::text")),
+        sa.Column("home_id", sa.String(36), sa.ForeignKey("homes.id", ondelete="CASCADE"), nullable=False),
         sa.Column("provider", sa.String(length=50), nullable=False),
         sa.Column("connection_type", sa.String(length=50), nullable=False),
-        sa.Column("connected_by", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=False),
+        sa.Column("connected_by", sa.String(36), sa.ForeignKey("users.id"), nullable=False),
         sa.Column("refresh_token", sa.Text(), nullable=False),
         sa.Column("access_token", sa.Text(), nullable=True),
         sa.Column("token_expires_at", sa.DateTime(timezone=True), nullable=True),
