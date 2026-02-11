@@ -1,5 +1,8 @@
 # Backend only. One API instance; clients (vivian-client, other devices) run separately
 # and connect to this API. For local dev with a client, run the client from its own repo.
+#
+# All environment variables are read from the root .env file.
+# Copy .env.example to .env and fill in your values before running.
 services:
   postgres:
     image: postgres:15-alpine
@@ -27,12 +30,30 @@ services:
       dockerfile: apps/api/Dockerfile
     ports:
       - "8000:8000"
-    env_file:
-      - apps/api/.env
     environment:
-      - VIVIAN_API_OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      - VIVIAN_API_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/vivian
+      # Pass through from root .env (docker compose reads .env automatically)
+      - VIVIAN_API_OPENROUTER_API_KEY=${VIVIAN_API_OPENROUTER_API_KEY}
+      - VIVIAN_API_OPENROUTER_MODEL=${VIVIAN_API_OPENROUTER_MODEL:-google/gemini-3-flash-preview}
+      - VIVIAN_API_HOST=${VIVIAN_API_HOST:-0.0.0.0}
+      - VIVIAN_API_PORT=${VIVIAN_API_PORT:-8000}
+      - VIVIAN_API_AUTH_JWT_SECRET=${VIVIAN_API_AUTH_JWT_SECRET:-dev-change-me}
+      - VIVIAN_API_AUTH_JWT_ALGORITHM=${VIVIAN_API_AUTH_JWT_ALGORITHM:-HS256}
+      - VIVIAN_API_AUTH_ACCESS_TOKEN_MINUTES=${VIVIAN_API_AUTH_ACCESS_TOKEN_MINUTES:-15}
+      - VIVIAN_API_AUTH_REFRESH_TOKEN_DAYS=${VIVIAN_API_AUTH_REFRESH_TOKEN_DAYS:-30}
       - VIVIAN_API_ENCRYPTION_KEY=${VIVIAN_API_ENCRYPTION_KEY}
+      - VIVIAN_API_DATABASE_URL=postgresql://postgres:postgres@postgres:5432/vivian
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/vivian
+      - VIVIAN_API_TEMP_UPLOAD_DIR=${VIVIAN_API_TEMP_UPLOAD_DIR:-/tmp/vivian-uploads}
+      - VIVIAN_API_CONFIDENCE_THRESHOLD=${VIVIAN_API_CONFIDENCE_THRESHOLD:-0.85}
+      - VIVIAN_API_CORS_ORIGINS=${VIVIAN_API_CORS_ORIGINS:-["http://localhost:3000", "http://client:3000"]}
+      - VIVIAN_API_GOOGLE_CLIENT_ID=${VIVIAN_API_GOOGLE_CLIENT_ID}
+      - VIVIAN_API_GOOGLE_CLIENT_SECRET=${VIVIAN_API_GOOGLE_CLIENT_SECRET}
+      - VIVIAN_API_GOOGLE_OAUTH_REDIRECT_URI=${VIVIAN_API_GOOGLE_OAUTH_REDIRECT_URI:-http://localhost:8000/api/v1/integrations/google/oauth/callback}
+      - VIVIAN_API_GOOGLE_OAUTH_TOKEN_STORE_PATH=${VIVIAN_API_GOOGLE_OAUTH_TOKEN_STORE_PATH:-/tmp/vivian-uploads/google-oauth.json}
+      - VIVIAN_API_OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - VIVIAN_API_MCP_SERVERS_ROOT_PATH=${VIVIAN_API_MCP_SERVERS_ROOT_PATH:-/mcp-servers}
+      - VIVIAN_API_MCP_DEFAULT_ENABLED_SERVERS=${VIVIAN_API_MCP_DEFAULT_ENABLED_SERVERS:-}
+      - VIVIAN_API_USER_LOCATION=${VIVIAN_API_USER_LOCATION:-}
     volumes:
       # Writable by container user (UID 1000); ensure host ./tmp is owned by 1000 or world-writable
       - ./tmp:/tmp/vivian-uploads
