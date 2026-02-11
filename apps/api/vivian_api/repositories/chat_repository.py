@@ -13,9 +13,6 @@ from fastapi.encoders import jsonable_encoder
 from vivian_api.models.chat_models import Chat, ChatMessage
 
 
-DEFAULT_USER_ID = "default_user"
-
-
 class ChatRepository:
     """Repository for ``Chat`` entities."""
 
@@ -25,7 +22,7 @@ class ChatRepository:
     def create(
         self,
         *,
-        user_id: str = DEFAULT_USER_ID,
+        user_id: str,
         title: str = "New Chat",
         model: str | None = None,
     ) -> Chat:
@@ -46,7 +43,7 @@ class ChatRepository:
     def list_for_user(
         self,
         *,
-        user_id: str = DEFAULT_USER_ID,
+        user_id: str,
         limit: int = 50,
         offset: int = 0,
     ) -> list[Chat]:

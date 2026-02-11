@@ -1,7 +1,10 @@
 """Ledger and balance router."""
 
 import json
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -15,6 +18,7 @@ from vivian_api.config import Settings
 from vivian_api.db.database import get_db
 from vivian_api.models.schemas import UnreimbursedBalanceResponse
 from vivian_api.services.mcp_client import MCPClient
+from vivian_api.services.mcp_registry import get_mcp_server_definitions
 
 
 router = APIRouter(
@@ -68,7 +72,28 @@ def _get_default_home_id(current_user: CurrentUserContext) -> str:
     """Get the user's default home ID."""
     if not current_user.default_membership:
         raise HTTPException(status_code=400, detail="No home membership found")
-    return str(current_user.default_membership.home_id)
+    return current_user.default_membership.home_id
+
+
+async def _create_mcp_client(
+    mcp_server_id: str,
+    db: Session,
+    home_id: str,
+) -> MCPClient:
+    """Create an MCPClient with database-backed configuration."""
+    definitions = get_mcp_server_definitions(settings)
+    definition = definitions.get(mcp_server_id)
+    if not definition:
+        raise ValueError(f"Unknown MCP server: {mcp_server_id}")
+
+    from vivian_api.services.google_integration import build_mcp_env_from_db
+    env = await build_mcp_env_from_db(home_id, mcp_server_id, db, settings)
+    return MCPClient(
+        server_command=definition.command,
+        process_env=env,
+        server_path_override=definition.server_path,
+        mcp_server_id=mcp_server_id,
+    )
 
 
 @router.get("/balance/unreimbursed", response_model=UnreimbursedBalanceResponse)
@@ -76,36 +101,44 @@ async def get_unreimbursed_balance(
     current_user: CurrentUserContext = Depends(get_current_user_context),
     db: Session = Depends(get_db),
 ):
-    """Get total of all unreimbursed HSA expenses."""
+    """Get total of all unreimbursed HSA expenses.
+    
+    Returns zero balance if MCP server is not configured or fails.
+    """
     home_id = _get_default_home_id(current_user)
     
-    # Create MCP client with database-backed configuration
-    mcp_client = await MCPClient.from_db(
-        server_command=["python", "-m", "vivian_mcp.server"],
-        home_id=home_id,
-        mcp_server_id="hsa_ledger",
-        db=db,
-    )
-    await mcp_client.start()
-    
     try:
-        result = await mcp_client.get_unreimbursed_balance()
+        mcp_client = await _create_mcp_client("hsa_ledger", db, home_id)
+        await mcp_client.start()
         
-        if not result.get("success") and "error" in result:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to get balance: {result.get('error')}"
+        try:
+            result = await mcp_client.get_unreimbursed_balance()
+            
+            if "error" in result and not result.get("total_unreimbursed"):
+                # MCP server responded with an error (likely spreadsheet not found)
+                logger.error("HSA balance MCP error: %s", result)
+                return UnreimbursedBalanceResponse(
+                    total_amount=0,
+                    count=0,
+                    is_configured=False
+                )
+            
+            return UnreimbursedBalanceResponse(
+                total_amount=result.get("total_unreimbursed", 0),
+                count=result.get("count", 0),
+                is_configured=True
             )
-        
-        return UnreimbursedBalanceResponse(
-            total_amount=result.get("total_unreimbursed", 0),
-            count=result.get("count", 0)
-        )
-        
+        finally:
+            await mcp_client.stop()
+            
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get balance: {str(e)}")
-    finally:
-        await mcp_client.stop()
+        # If MCP server isn't configured or fails to start, return not configured
+        logger.error("HSA balance check failed: %s", e, exc_info=True)
+        return UnreimbursedBalanceResponse(
+            total_amount=0,
+            count=0,
+            is_configured=False
+        )
 
 
 @router.get("/summary", response_model=LedgerSummaryResponse)
@@ -130,12 +163,7 @@ async def get_ledger_summary(
     """
     home_id = _get_default_home_id(current_user)
     
-    mcp_client = await MCPClient.from_db(
-        server_command=["python", "-m", "vivian_mcp.server"],
-        home_id=home_id,
-        mcp_server_id="hsa_ledger",
-        db=db,
-    )
+    mcp_client = await _create_mcp_client("hsa_ledger", db, home_id)
     await mcp_client.start()
     
     try:
@@ -226,19 +254,16 @@ async def get_charitable_summary(
     """
     home_id = _get_default_home_id(current_user)
     
-    # Create MCP client with database-backed configuration
-    mcp_client = await MCPClient.from_db(
-        server_command=["python", "-m", "vivian_mcp.server"],
-        home_id=home_id,
-        mcp_server_id="charitable_ledger",
-        db=db,
-    )
+    mcp_client = await _create_mcp_client("charitable_ledger", db, home_id)
     await mcp_client.start()
     
     try:
+        payload: dict[str, str] = {}
+        if tax_year:
+            payload["tax_year"] = tax_year
         result = await mcp_client.call_tool(
             "get_charitable_summary",
-            {"tax_year": tax_year}
+            payload
         )
         
         # Parse the result

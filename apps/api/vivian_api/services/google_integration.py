@@ -144,7 +144,7 @@ def build_mcp_env(settings: Settings) -> dict[str, str]:
     if settings.mcp_not_eligible_folder_id:
         env["VIVIAN_MCP_NOT_ELIGIBLE_FOLDER_ID"] = settings.mcp_not_eligible_folder_id
     if settings.mcp_sheets_spreadsheet_id:
-        env["VIVIAN_MCP_SHEETS_SPREADSHEET_ID"] = settings.mcp_sheets_spreadsheet_id
+        env["VIVIAN_MCP_HSA_SPREADSHEET_ID"] = settings.mcp_sheets_spreadsheet_id
     if settings.charitable_drive_folder_id:
         env["VIVIAN_MCP_CHARITABLE_DRIVE_FOLDER_ID"] = settings.charitable_drive_folder_id
     if settings.charitable_spreadsheet_id:
@@ -209,17 +209,26 @@ async def build_mcp_env_from_db(
         mcp_settings = settings_repo.get_by_home_and_server(home_id, mcp_server_id)
         
         if mcp_settings and mcp_settings.settings_json:
-            # Map settings_json keys to environment variables
-            # Expected keys: google_spreadsheet_id, google_worksheet_name,
-            # drive_root_folder_id, reimbursed_folder_id, unreimbursed_folder_id, not_eligible_folder_id
-            settings_map = {
-                "google_spreadsheet_id": "VIVIAN_MCP_SHEETS_SPREADSHEET_ID",
-                "google_worksheet_name": "VIVIAN_MCP_SHEETS_WORKSHEET_NAME",
-                "drive_root_folder_id": "VIVIAN_MCP_DRIVE_ROOT_FOLDER_ID",
-                "reimbursed_folder_id": "VIVIAN_MCP_REIMBURSED_FOLDER_ID",
-                "unreimbursed_folder_id": "VIVIAN_MCP_UNREIMBURSED_FOLDER_ID",
-                "not_eligible_folder_id": "VIVIAN_MCP_NOT_ELIGIBLE_FOLDER_ID",
+            # Map settings_json keys to environment variables.
+            # Keys come from required_settings in mcp_registry.py.
+            # Per-server maps are required because both HSA and charitable
+            # use "spreadsheet_id" as their DB key but need different env vars.
+            server_settings_maps: dict[str, dict[str, str]] = {
+                "hsa_ledger": {
+                    "spreadsheet_id": "VIVIAN_MCP_HSA_SPREADSHEET_ID",
+                    "worksheet_name": "VIVIAN_MCP_HSA_WORKSHEET_NAME",
+                    "drive_root_folder_id": "VIVIAN_MCP_DRIVE_ROOT_FOLDER_ID",
+                    "drive_reimbursed_folder_id": "VIVIAN_MCP_REIMBURSED_FOLDER_ID",
+                    "drive_unreimbursed_folder_id": "VIVIAN_MCP_UNREIMBURSED_FOLDER_ID",
+                    "drive_not_eligible_folder_id": "VIVIAN_MCP_NOT_ELIGIBLE_FOLDER_ID",
+                },
+                "charitable_ledger": {
+                    "spreadsheet_id": "VIVIAN_MCP_CHARITABLE_SPREADSHEET_ID",
+                    "drive_folder_id": "VIVIAN_MCP_CHARITABLE_DRIVE_FOLDER_ID",
+                    "worksheet_name": "VIVIAN_MCP_CHARITABLE_WORKSHEET_NAME",
+                },
             }
+            settings_map = server_settings_maps.get(mcp_server_id, {})
             
             for settings_key, env_key in settings_map.items():
                 value = mcp_settings.settings_json.get(settings_key)
@@ -240,10 +249,10 @@ async def build_mcp_env_from_db(
         env["VIVIAN_MCP_UNREIMBURSED_FOLDER_ID"] = settings.mcp_unreimbursed_folder_id
     if "VIVIAN_MCP_NOT_ELIGIBLE_FOLDER_ID" not in env and settings.mcp_not_eligible_folder_id:
         env["VIVIAN_MCP_NOT_ELIGIBLE_FOLDER_ID"] = settings.mcp_not_eligible_folder_id
-    if "VIVIAN_MCP_SHEETS_SPREADSHEET_ID" not in env and settings.mcp_sheets_spreadsheet_id:
-        env["VIVIAN_MCP_SHEETS_SPREADSHEET_ID"] = settings.mcp_sheets_spreadsheet_id
-    if "VIVIAN_MCP_SHEETS_WORKSHEET_NAME" not in env and settings.mcp_sheets_worksheet_name:
-        env["VIVIAN_MCP_SHEETS_WORKSHEET_NAME"] = settings.mcp_sheets_worksheet_name
+    if "VIVIAN_MCP_HSA_SPREADSHEET_ID" not in env and settings.mcp_sheets_spreadsheet_id:
+        env["VIVIAN_MCP_HSA_SPREADSHEET_ID"] = settings.mcp_sheets_spreadsheet_id
+    if "VIVIAN_MCP_HSA_WORKSHEET_NAME" not in env and settings.mcp_sheets_worksheet_name:
+        env["VIVIAN_MCP_HSA_WORKSHEET_NAME"] = settings.mcp_sheets_worksheet_name
     
     return env
 

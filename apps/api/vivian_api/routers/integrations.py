@@ -29,7 +29,6 @@ from vivian_api.services.google_integration import (
 router = APIRouter(
     prefix="/integrations",
     tags=["integrations"],
-    dependencies=[Depends(get_current_user_context)],
 )
 settings = Settings()
 
@@ -92,7 +91,7 @@ def _get_default_home_id(current_user: CurrentUserContext) -> str:
     """Get the user's default home ID."""
     if not current_user.default_membership:
         raise HTTPException(status_code=400, detail="No home membership found")
-    return str(current_user.default_membership.home_id)
+    return current_user.default_membership.home_id
 
 
 async def _refresh_google_token(
@@ -228,7 +227,7 @@ async def start_google_oauth(
     _oauth_state_store[state] = {
         "created_at": _utc_now().isoformat(),
         "return_to": return_to or settings.google_oauth_success_redirect,
-        "user_id": str(current_user.user.id),
+        "user_id": current_user.user.id,
     }
 
     query = urlencode(
@@ -326,7 +325,7 @@ async def google_oauth_callback(
     if not membership:
         return RedirectResponse(_redirect_with_status(return_to, "error", "no_home_membership"))
 
-    home_id = str(membership.home_id)
+    home_id = membership.home_id
 
     # Get email from token info
     token_info = await _get_token_info(access_token)

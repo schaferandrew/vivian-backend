@@ -40,6 +40,12 @@ class CheckDuplicateRequest(BaseModel):
     fuzzy_days: int = 3
 
 
+class CheckCharitableDuplicateRequest(BaseModel):
+    """Request to check one charitable donation payload for duplicates."""
+    charitable_data: CharitableDonationSchema
+    fuzzy_days: int = 3
+
+
 class CheckDuplicateResponse(BaseModel):
     """Response from duplicate-check endpoint."""
     is_duplicate: bool
@@ -181,6 +187,7 @@ class UnreimbursedBalanceResponse(BaseModel):
     """Response with unreimbursed balance."""
     total_amount: float
     count: int
+    is_configured: bool = True  # Whether MCP server is properly configured
 
 
 class HealthCheckResponse(BaseModel):

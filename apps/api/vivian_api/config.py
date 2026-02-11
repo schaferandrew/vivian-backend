@@ -105,8 +105,15 @@ def set_enabled_mcp_servers(server_ids: list[str]) -> None:
 
 
 def get_ollama_base_url() -> str:
-    """Get Ollama base URL."""
-    return os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    """Get Ollama base URL.
+
+    Checks VIVIAN_API_OLLAMA_BASE_URL first (set by docker-compose),
+    then falls back to OLLAMA_BASE_URL, then to localhost default.
+    """
+    return os.environ.get(
+        "VIVIAN_API_OLLAMA_BASE_URL",
+        os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
+    )
 
 
 class Settings(BaseSettings):
@@ -142,6 +149,18 @@ class Settings(BaseSettings):
     mcp_default_enabled_servers: str = ""
     # JSON array for future custom server definitions.
     mcp_custom_servers_json: str = ""
+    
+    # Legacy MCP folder settings (fallback when DB settings not available)
+    mcp_drive_root_folder_id: str = ""
+    mcp_reimbursed_folder_id: str = ""
+    mcp_unreimbursed_folder_id: str = ""
+    mcp_not_eligible_folder_id: str = ""
+    mcp_sheets_spreadsheet_id: str = ""
+    mcp_sheets_worksheet_name: str = ""
+    charitable_drive_folder_id: str = ""
+    charitable_spreadsheet_id: str = ""
+    charitable_worksheet_name: str = ""
+    
     user_location: str = ""
     
     # Temp storage
@@ -195,12 +214,12 @@ class Settings(BaseSettings):
         return str(Path(self.mcp_servers_root_path) / folder_name)
 
 
-def check_ollama_status() -> dict:
+async def check_ollama_status() -> dict:
     """Check if Ollama is running."""
     ollama_url = get_ollama_base_url()
     try:
-        with httpx.Client() as client:
-            response = client.get(f"{ollama_url}/api/tags", timeout=2.0)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{ollama_url}/api/tags", timeout=2.0)
             if response.status_code == 200:
                 return {"status": "running", "available": True}
             return {"status": "error", "available": False}

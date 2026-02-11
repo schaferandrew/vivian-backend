@@ -20,6 +20,7 @@ from vivian_api.models.schemas import (
     ReceiptParseRequest,
     ReceiptParseResponse,
     CheckDuplicateRequest,
+    CheckCharitableDuplicateRequest,
     CheckDuplicateResponse,
     ConfirmReceiptRequest,
     ConfirmReceiptResponse,
@@ -56,7 +57,7 @@ settings = Settings()
 
 
 async def _create_mcp_client(
-    mcp_server_id: str = "vivian_hsa",
+    mcp_server_id: str = "hsa_ledger",
     db: Session | None = None,
     home_id: str | None = None,
 ) -> MCPClient:
@@ -99,7 +100,7 @@ def _get_default_home_id(current_user: CurrentUserContext) -> str:
     """Get the user's default home ID."""
     if not current_user.default_membership:
         raise HTTPException(status_code=400, detail="No home membership found")
-    return str(current_user.default_membership.home_id)
+    return current_user.default_membership.home_id
 
 
 def get_temp_dir() -> Path:
@@ -195,28 +196,36 @@ async def parse_receipt(
         
         category = _infer_category(parsed_data)
 
+        hsa_expense = ExpenseSchema(
+            provider=parsed_data.get("provider")
+            or parsed_data.get("organization_name")
+            or "Unknown Provider",
+            service_date=parsed_data.get("service_date") or parsed_data.get("donation_date"),
+            paid_date=parsed_data.get("paid_date") or parsed_data.get("donation_date"),
+            amount=float(parsed_data.get("amount", 0)),
+            hsa_eligible=parsed_data.get("hsa_eligible") if parsed_data.get("hsa_eligible") is not None else True,
+            raw_model_output=raw_output,
+        )
+
+        charitable_donation = CharitableDonationSchema(
+            organization_name=parsed_data.get("organization_name")
+            or parsed_data.get("provider")
+            or "Unknown Organization",
+            donation_date=parsed_data.get("donation_date") or parsed_data.get("service_date"),
+            amount=float(parsed_data.get("amount", 0)),
+            tax_deductible=parsed_data.get("tax_deductible") if parsed_data.get("tax_deductible") is not None else True,
+            description=parsed_data.get("description"),
+            raw_model_output=raw_output,
+        )
+
         if category == ExpenseCategory.CHARITABLE:
             confidence = _compute_charitable_confidence(parsed_data)
-            donation = CharitableDonationSchema(
-                organization_name=parsed_data.get("organization_name", "Unknown Organization"),
-                donation_date=parsed_data.get("donation_date"),
-                amount=float(parsed_data.get("amount", 0)),
-                tax_deductible=parsed_data.get("tax_deductible", True),
-                description=parsed_data.get("description"),
-                raw_model_output=raw_output,
-            )
-            expense = None
+            donation = charitable_donation
+            expense = hsa_expense
         else:
             confidence = _compute_hsa_confidence(parsed_data)
-            donation = None
-            expense = ExpenseSchema(
-                provider=parsed_data.get("provider", "Unknown Provider"),
-                service_date=parsed_data.get("service_date"),
-                paid_date=parsed_data.get("paid_date"),
-                amount=float(parsed_data.get("amount", 0)),
-                hsa_eligible=parsed_data.get("hsa_eligible", True),
-                raw_model_output=raw_output
-            )
+            donation = charitable_donation
+            expense = hsa_expense
 
         is_duplicate = False
         duplicate_info: list[DuplicateInfo] | None = None
@@ -225,7 +234,7 @@ async def parse_receipt(
         if expense and expense.hsa_eligible:
             try:
                 home_id = _get_default_home_id(current_user)
-                mcp_client = await _create_mcp_client("vivian_hsa", db, home_id)
+                mcp_client = await _create_mcp_client("hsa_ledger", db, home_id)
                 await mcp_client.start()
                 dup_result = await _check_duplicates(mcp_client, expense)
                 if dup_result.get("is_duplicate"):
@@ -238,9 +247,25 @@ async def parse_receipt(
             finally:
                 if mcp_client:
                     await mcp_client.stop()
+        elif category == ExpenseCategory.CHARITABLE and donation:
+            try:
+                home_id = _get_default_home_id(current_user)
+                mcp_client = await _create_mcp_client("charitable_ledger", db, home_id)
+                await mcp_client.start()
+                dup_result = await _check_charitable_duplicates(mcp_client, donation)
+                if dup_result.get("is_duplicate"):
+                    is_duplicate = True
+                    duplicate_info = [DuplicateInfo(**d) for d in dup_result.get("potential_duplicates", [])]
+                if dup_result.get("check_error"):
+                    duplicate_check_error = str(dup_result["check_error"])
+            except Exception as dup_error:
+                duplicate_check_error = f"Duplicate check unavailable: {dup_error}"
+            finally:
+                if mcp_client:
+                    await mcp_client.stop()
         
         parsed_receipt = ParsedReceipt(
-            category=category,
+            suggested_category=category,
             expense=expense,
             charitable_data=donation,
             confidence=max(0, confidence),
@@ -303,6 +328,7 @@ async def confirm_receipt(
     mcp_client = await _create_mcp_client(mcp_server_id, db, home_id)
     await mcp_client.start()
     
+    status_value = None
     try:
         # Check for duplicates first (if not forcing)
         if category == ExpenseCategory.HSA:
@@ -334,6 +360,18 @@ async def confirm_receipt(
             charitable_data = request.charitable_data
             if charitable_data is None:
                 raise HTTPException(status_code=422, detail="charitable_data is required for charitable receipts")
+            if not request.force:
+                donation_dict = charitable_data.model_dump()
+                dup_result = await mcp_client.check_charitable_duplicates(donation_dict)
+
+                if dup_result.get("is_duplicate"):
+                    return ConfirmReceiptResponse(
+                        success=False,
+                        message=f"Duplicate detected: {dup_result.get('recommendation', 'review')}",
+                        is_duplicate=True,
+                        duplicate_info=[DuplicateInfo(**d) for d in dup_result.get("potential_duplicates", [])]
+                    )
+
             donation_year = (
                 charitable_data.donation_date.year
                 if charitable_data.donation_date
@@ -365,8 +403,8 @@ async def confirm_receipt(
 
             ledger_result = await mcp_client.append_to_ledger(
                 expense_dict,
-                status_value,
-                drive_file_id
+                status_value or ReimbursementStatus.UNREIMBURSED.value,
+                drive_file_id,
             )
         else:
             charitable_data = request.charitable_data
@@ -383,19 +421,18 @@ async def confirm_receipt(
             duplicate_check = ledger_result.get("duplicate_check") or {}
             duplicate_error = str(ledger_result.get("error") or "").lower()
 
-            if category == ExpenseCategory.HSA:
-                # If append step reports duplicate, surface it as a duplicate response
-                # so the client can show skip/override instead of a generic failure.
-                if not request.force and (
-                    duplicate_check.get("is_duplicate") or "duplicate" in duplicate_error
-                ):
-                    potential_duplicates = duplicate_check.get("potential_duplicates", [])
-                    return ConfirmReceiptResponse(
-                        success=False,
-                        message=f"Duplicate detected: {duplicate_check.get('recommendation', 'review')}",
-                        is_duplicate=True,
-                        duplicate_info=[DuplicateInfo(**d) for d in potential_duplicates],
-                    )
+            # If append step reports duplicate, surface it as a duplicate response
+            # so the client can show skip/override instead of a generic failure.
+            if not request.force and (
+                duplicate_check.get("is_duplicate") or "duplicate" in duplicate_error
+            ):
+                potential_duplicates = duplicate_check.get("potential_duplicates", [])
+                return ConfirmReceiptResponse(
+                    success=False,
+                    message=f"Duplicate detected: {duplicate_check.get('recommendation', 'review')}",
+                    is_duplicate=True,
+                    duplicate_info=[DuplicateInfo(**d) for d in potential_duplicates],
+                )
 
             raise HTTPException(
                 status_code=500,
@@ -451,6 +488,26 @@ async def _check_duplicates(
         }
 
 
+async def _check_charitable_duplicates(
+    mcp_client: MCPClient,
+    donation: CharitableDonationSchema,
+    fuzzy_days: int = 3,
+) -> dict:
+    """Check for duplicate charitable donations in the ledger."""
+    try:
+        donation_dict = donation.model_dump()
+        result = await mcp_client.check_charitable_duplicates(donation_dict, fuzzy_days=fuzzy_days)
+        return result
+    except Exception as e:
+        # If duplicate check fails, return empty result (allow import)
+        return {
+            "is_duplicate": False,
+            "potential_duplicates": [],
+            "recommendation": "import",
+            "check_error": str(e),
+        }
+
+
 @router.post("/check-duplicate", response_model=CheckDuplicateResponse)
 async def check_duplicate(
     request: CheckDuplicateRequest,
@@ -466,12 +523,45 @@ async def check_duplicate(
         )
 
     home_id = _get_default_home_id(current_user)
-    mcp_client = await _create_mcp_client("vivian_hsa", db, home_id)
+    mcp_client = await _create_mcp_client("hsa_ledger", db, home_id)
     try:
         await mcp_client.start()
         dup_result = await _check_duplicates(
             mcp_client,
             request.expense_data,
+            fuzzy_days=request.fuzzy_days,
+        )
+        return CheckDuplicateResponse(
+            is_duplicate=bool(dup_result.get("is_duplicate")),
+            duplicate_info=[DuplicateInfo(**d) for d in dup_result.get("potential_duplicates", [])],
+            recommendation=str(dup_result.get("recommendation", "import")),
+            check_error=str(dup_result.get("check_error")) if dup_result.get("check_error") else None,
+        )
+    except Exception as e:
+        return CheckDuplicateResponse(
+            is_duplicate=False,
+            duplicate_info=[],
+            recommendation="import",
+            check_error=f"Duplicate check unavailable: {e}",
+        )
+    finally:
+        await mcp_client.stop()
+
+
+@router.post("/check-charitable-duplicate", response_model=CheckDuplicateResponse)
+async def check_charitable_duplicate(
+    request: CheckCharitableDuplicateRequest,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
+    """Check edited charitable donation payload for potential duplicates."""
+    home_id = _get_default_home_id(current_user)
+    mcp_client = await _create_mcp_client("charitable_ledger", db, home_id)
+    try:
+        await mcp_client.start()
+        dup_result = await _check_charitable_duplicates(
+            mcp_client,
+            request.charitable_data,
             fuzzy_days=request.fuzzy_days,
         )
         return CheckDuplicateResponse(
@@ -590,7 +680,7 @@ async def _scan_file_paths(
                     service_date=parsed.get("service_date"),
                     paid_date=parsed.get("paid_date"),
                     amount=float(parsed.get("amount", 0)),
-                    hsa_eligible=parsed.get("hsa_eligible", True),
+                    hsa_eligible=parsed.get("hsa_eligible") if parsed.get("hsa_eligible") is not None else True,
                     raw_model_output=parse_result.get("raw_output"),
                 )
 
@@ -710,7 +800,7 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
                             service_date=parsed.get("service_date"),
                             paid_date=parsed.get("paid_date"),
                             amount=float(parsed.get("amount", 0)),
-                            hsa_eligible=parsed.get("hsa_eligible", True),
+                            hsa_eligible=parsed.get("hsa_eligible") if parsed.get("hsa_eligible") is not None else True,
                             raw_model_output=parse_result.get("raw_output"),
                         ),
                     )

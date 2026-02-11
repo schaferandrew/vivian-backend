@@ -416,7 +416,7 @@ async def list_models(
     _current_user: CurrentUserContext = Depends(get_current_user_context),
 ):
     """List available OpenRouter models with provider status."""
-    ollama_status = check_ollama_status()
+    ollama_status = await check_ollama_status()
     
     providers = {
         "OpenAI": {"status": "available"},
@@ -450,7 +450,7 @@ async def select_model(
     _current_user: CurrentUserContext = Depends(get_current_user_context),
 ):
     """Change the active model (in-memory)."""
-    ollama_status = check_ollama_status()
+    ollama_status = await check_ollama_status()
     
     valid_ids = [m["id"] for m in AVAILABLE_MODELS]
     if request.model_id not in valid_ids:

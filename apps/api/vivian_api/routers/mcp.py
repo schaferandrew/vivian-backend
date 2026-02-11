@@ -115,7 +115,7 @@ def _get_default_home_id(current_user: CurrentUserContext) -> str:
     """Get the user's default home ID."""
     if not current_user.default_membership:
         raise HTTPException(status_code=400, detail="No home membership found")
-    return str(current_user.default_membership.home_id)
+    return current_user.default_membership.home_id
 
 
 def _is_owner(current_user: CurrentUserContext) -> bool:
@@ -147,16 +147,16 @@ async def list_mcp_servers(
         
         # Build settings schema
         schema = None
-        if definition.settings_schema:
+        if definition.required_settings:
             schema = [
                 MCPServerSettingsSchema(
                     key=s["key"],
                     label=s["label"],
                     type=s.get("type", "string"),
-                    required=s.get("required", False),
+                    required=True,
                     default=s.get("default"),
                 )
-                for s in definition.settings_schema
+                for s in definition.required_settings
             ]
         
         servers.append(
@@ -198,16 +198,16 @@ async def get_mcp_server_settings(
     
     # Build settings schema
     schema = []
-    if definition.settings_schema:
+    if definition.required_settings:
         schema = [
             MCPServerSettingsSchema(
                 key=s["key"],
                 label=s["label"],
                 type=s.get("type", "string"),
-                required=s.get("required", False),
+                required=True,
                 default=s.get("default"),
             )
-            for s in definition.settings_schema
+            for s in definition.required_settings
         ]
     
     return MCPSettingsResponse(
@@ -234,18 +234,18 @@ async def update_mcp_server_settings(
         raise HTTPException(status_code=404, detail=f"Unknown MCP server: {server_id}")
     
     # Validate settings against schema
-    if definition.settings_schema:
-        allowed_keys = {s["key"] for s in definition.settings_schema}
+    if definition.required_settings:
+        allowed_keys = {s["key"] for s in definition.required_settings}
         for key in request.settings.keys():
             if key not in allowed_keys:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Invalid setting key: {key}. Allowed: {', '.join(sorted(allowed_keys))}",
                 )
-        
+
         # Check required fields
-        for schema_field in definition.settings_schema:
-            if schema_field.get("required") and not request.settings.get(schema_field["key"]):
+        for schema_field in definition.required_settings:
+            if not request.settings.get(schema_field["key"]):
                 raise HTTPException(
                     status_code=400,
                     detail=f"Required setting missing: {schema_field['key']}",

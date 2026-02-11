@@ -244,7 +244,7 @@ class HSAToolManager:
         if self._worksheet_title:
             return self._worksheet_title
 
-        spreadsheet_id = self.settings.sheets_spreadsheet_id
+        spreadsheet_id = self.settings.hsa_spreadsheet_id
         metadata = service.spreadsheets().get(
             spreadsheetId=spreadsheet_id,
             fields="sheets(properties(title))",
@@ -259,7 +259,7 @@ class HSAToolManager:
             raise ValueError("Google Sheet has no worksheet tabs")
 
         preferred_titles = []
-        configured_title = (self.settings.sheets_worksheet_name or "").strip()
+        configured_title = (self.settings.hsa_worksheet_name or "").strip()
         if configured_title:
             preferred_titles.append(configured_title)
         if "HSA_Ledger" not in preferred_titles:
@@ -549,7 +549,7 @@ class HSAToolManager:
         """
         try:
             service = self._get_sheets_service()
-            spreadsheet_id = self.settings.sheets_spreadsheet_id
+            spreadsheet_id = self.settings.hsa_spreadsheet_id
             worksheet_title = self._resolve_worksheet_title(service)
             
             # Fetch all existing entries
@@ -632,7 +632,7 @@ class HSAToolManager:
         """
         try:
             service = self._get_sheets_service()
-            spreadsheet_id = self.settings.sheets_spreadsheet_id
+            spreadsheet_id = self.settings.hsa_spreadsheet_id
             worksheet_title = self._resolve_worksheet_title(service)
             
             # Check for duplicates if enabled
@@ -714,7 +714,7 @@ class HSAToolManager:
         """Bulk import parsed receipts with per-file Drive upload and batched ledger append."""
         try:
             service = self._get_sheets_service()
-            spreadsheet_id = self.settings.sheets_spreadsheet_id
+            spreadsheet_id = self.settings.hsa_spreadsheet_id
             worksheet_title = self._resolve_worksheet_title(service)
 
             fetch_result = service.spreadsheets().values().get(
@@ -854,7 +854,7 @@ class HSAToolManager:
         """Update reimbursement status of an expense."""
         try:
             service = self._get_sheets_service()
-            spreadsheet_id = self.settings.sheets_spreadsheet_id
+            spreadsheet_id = self.settings.hsa_spreadsheet_id
             
             # Find the row with matching ID
             result = service.spreadsheets().values().get(
@@ -918,7 +918,7 @@ class HSAToolManager:
         """Calculate total unreimbursed expenses."""
         try:
             service = self._get_sheets_service()
-            spreadsheet_id = self.settings.sheets_spreadsheet_id
+            spreadsheet_id = self.settings.hsa_spreadsheet_id
             
             result = service.spreadsheets().values().get(
                 spreadsheetId=spreadsheet_id,
@@ -974,8 +974,8 @@ class HSAToolManager:
         """
         try:
             service = self._get_sheets_service()
-            spreadsheet_id = self.settings.sheets_spreadsheet_id
-            sheet_title = self.settings.sheets_worksheet_name or "HSA_Ledger"
+            spreadsheet_id = self.settings.hsa_spreadsheet_id
+            sheet_title = self.settings.hsa_worksheet_name or "HSA_Ledger"
             
             # Fetch all data
             result = service.spreadsheets().values().get(

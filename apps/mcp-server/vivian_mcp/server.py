@@ -270,7 +270,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Optional custom filename"
                     }
                 },
-                "required": ["local_file_path", "tax_year"]
+                "required": ["local_file_path"]
             }
         ),
         Tool(
@@ -409,7 +409,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name == "upload_charitable_receipt_to_drive":
             result = await charitable_tools.upload_receipt_to_drive(
                 arguments["local_file_path"],
-                arguments["tax_year"],
+                arguments.get("tax_year"),
                 arguments.get("filename")
             )
             return [TextContent(type="text", text=result)]
@@ -419,7 +419,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 arguments["donation_json"],
                 arguments["drive_file_id"],
                 arguments.get("check_duplicates", True),
-                arguments.get("force_append", False)
+                arguments.get("force_append", False),
             )
             return [TextContent(type="text", text=result)]
 

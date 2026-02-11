@@ -192,8 +192,6 @@ class MCPClient:
         payload = {
             "local_file_path": local_file_path,
         }
-        if donation_year:
-            payload["donation_year"] = donation_year
         if filename:
             payload["filename"] = filename
 
@@ -239,6 +237,28 @@ class MCPClient:
             payload["fuzzy_days"] = fuzzy_days
         result = await self.call_tool("check_for_duplicates", payload)
         
+        content = result.get("content", [{}])[0].get("text", "{}")
+        return json.loads(content)
+
+    async def check_charitable_duplicates(
+        self,
+        donation_json: dict,
+        fuzzy_days: int = 3
+    ) -> dict:
+        """Check for duplicate charitable donations in the ledger.
+
+        Args:
+            donation_json: Donation data with organization_name, donation_date, amount
+            fuzzy_days: Number of days to allow for fuzzy date matching
+
+        Returns:
+            Dict with is_duplicate, potential_duplicates, recommendation
+        """
+        payload = {"donation_json": donation_json}
+        if fuzzy_days != 3:
+            payload["fuzzy_days"] = fuzzy_days
+        result = await self.call_tool("check_charitable_duplicates", payload)
+
         content = result.get("content", [{}])[0].get("text", "{}")
         return json.loads(content)
 

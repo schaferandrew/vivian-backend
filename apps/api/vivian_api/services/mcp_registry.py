@@ -129,7 +129,6 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
             required_settings=[
                 {"key": "drive_folder_id", "label": "Drive Folder ID", "type": "folder_id"},
                 {"key": "spreadsheet_id", "label": "Spreadsheet ID", "type": "spreadsheet_id"},
-                {"key": "worksheet_name", "label": "Worksheet Name", "type": "text"},
             ],
         ),
         "test_addition": MCPServerDefinition(
@@ -187,11 +186,11 @@ def compute_server_status(
 def normalize_enabled_server_ids(
     requested_ids: list[str] | None,
     settings: Settings,
-    server_statuses: dict[str, MCPServerStatus],
+    server_statuses: dict[str, MCPServerStatus] | None = None,
 ) -> list[str]:
     """Validate and normalize enabled server IDs against known registry.
-    
-    Only allows enabling servers that are not blocked.
+
+    Only allows enabling servers that are not blocked if server_statuses is provided.
     """
     definitions = get_mcp_server_definitions(settings)
     allowed_ids = set(definitions.keys())
@@ -213,9 +212,10 @@ def normalize_enabled_server_ids(
     for server_id in requested_ids:
         if server_id not in allowed_ids:
             continue
-        status = server_statuses.get(server_id)
-        if status and status.status == "blocked":
-            continue  # Cannot enable blocked servers
+        if server_statuses:
+            status = server_statuses.get(server_id)
+            if status and status.status == "blocked":
+                continue  # Cannot enable blocked servers
         valid_ids.append(server_id)
 
     return list(dict.fromkeys(valid_ids))

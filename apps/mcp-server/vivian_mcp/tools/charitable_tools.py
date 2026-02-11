@@ -33,6 +33,12 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
     def __init__(self):
         super().__init__(Settings())
 
+    def _resolve_spreadsheet(self) -> tuple[str, str]:
+        """Return (spreadsheet_id, worksheet_name) from settings."""
+        spreadsheet_id = self.settings.charitable_spreadsheet_id or self.settings.hsa_spreadsheet_id
+        worksheet_name = self.settings.charitable_worksheet_name or self.settings.hsa_worksheet_name or "Charitable Donations"
+        return spreadsheet_id, worksheet_name
+
     def _get_tax_year(self, donation_date: str) -> str:
         """Extract tax year from donation date."""
         try:
@@ -63,25 +69,28 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
     async def upload_receipt_to_drive(
         self,
         local_file_path: str,
-        tax_year: str,
+        tax_year: str = None,
         filename: str = None
     ) -> str:
-        """Upload receipt to year-based folder in Google Drive.
+        """Upload receipt to Google Drive.
         
         Args:
             local_file_path: Path to local receipt file
-            tax_year: Tax year for folder organization (e.g., "2025")
+            tax_year: Optional tax year for folder organization (e.g., "2025")
             filename: Optional custom filename
             
         Returns:
             JSON string with success, file_id, error
         """
         try:
-            # Ensure year folder exists
-            folder_result = await self.get_or_create_folder(
-                folder_name=tax_year,
-                parent_folder_id=self.settings.drive_root_folder_id
-            )
+            # Use charitable folder, fall back to root
+            drive_folder_id = self.settings.charitable_drive_folder_id or self.settings.drive_root_folder_id
+            if not drive_folder_id:
+                return json.dumps({
+                    "success": False,
+                    "error": "No drive folder configured. Set charitable_drive_folder_id or drive_root_folder_id in settings."
+                })
+            folder_result = {"success": True, "folder_id": drive_folder_id}
             
             if not folder_result.get("success"):
                 return json.dumps({
@@ -116,7 +125,7 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
         donation_json: dict,
         drive_file_id: str,
         check_duplicates: bool = True,
-        force_append: bool = False
+        force_append: bool = False,
     ) -> str:
         """Append donation to charitable ledger.
         
@@ -141,10 +150,18 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
             # Calculate tax year
             tax_year = self._get_tax_year(donation_date)
             
-            # Ensure worksheet exists
+            # Resolve spreadsheet and worksheet from settings
+            spreadsheet_id, worksheet_name = self._resolve_spreadsheet()
+            
+            if not spreadsheet_id:
+                return json.dumps({
+                    "success": False,
+                    "error": "No spreadsheet ID configured. Set charitable_spreadsheet_id in MCP server settings."
+                })
+            
             ensure_result = await self.ensure_worksheet_exists(
-                spreadsheet_id=self.settings.sheets_spreadsheet_id,
-                worksheet_name=self.settings.sheets_worksheet_name,
+                spreadsheet_id=spreadsheet_id,
+                worksheet_name=worksheet_name,
                 headers=self.EXPECTED_HEADERS
             )
             
@@ -184,8 +201,8 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
             
             # Append to sheet
             append_result = await self.append_row(
-                spreadsheet_id=self.settings.sheets_spreadsheet_id,
-                worksheet_name=self.settings.sheets_worksheet_name,
+                spreadsheet_id=spreadsheet_id,
+                worksheet_name=worksheet_name,
                 row_data=row_data
             )
             
@@ -223,9 +240,10 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
         """
         try:
             # Get all existing entries
+            spreadsheet_id, worksheet_name = self._resolve_spreadsheet()
             rows_result = await self.get_all_rows(
-                spreadsheet_id=self.settings.sheets_spreadsheet_id,
-                worksheet_name=self.settings.sheets_worksheet_name
+                spreadsheet_id=spreadsheet_id,
+                worksheet_name=worksheet_name
             )
             
             if not rows_result.get("success"):
@@ -336,9 +354,10 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
         """
         try:
             # Get all entries
+            spreadsheet_id, worksheet_name = self._resolve_spreadsheet()
             rows_result = await self.get_all_rows(
-                spreadsheet_id=self.settings.sheets_spreadsheet_id,
-                worksheet_name=self.settings.sheets_worksheet_name
+                spreadsheet_id=spreadsheet_id,
+                worksheet_name=worksheet_name
             )
             
             if not rows_result.get("success"):

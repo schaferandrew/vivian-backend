@@ -41,7 +41,7 @@ class CharitableDonationSchema(BaseModel):
 
 class ParsedReceipt(BaseModel):
     """Result of parsing a receipt."""
-    category: ExpenseCategory = ExpenseCategory.HSA
+    suggested_category: ExpenseCategory = ExpenseCategory.HSA
     expense: Optional[ExpenseSchema] = None
     charitable_data: Optional[CharitableDonationSchema] = None
     confidence: float = Field(ge=0.0, le=1.0, description="Model confidence score")

@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from vivian_api.models.chat_models import Chat, ChatMessage
 from vivian_api.repositories import (
-    DEFAULT_USER_ID,
     ChatMessageRepository,
     ChatRepository,
 )
@@ -16,7 +15,7 @@ from vivian_api.repositories import (
 
 def create_chat(
     db: Session,
-    user_id: str = DEFAULT_USER_ID,
+    user_id: str,
     title: str = "New Chat",
     model: str | None = None,
 ) -> Chat:
@@ -31,7 +30,7 @@ def get_chat(db: Session, chat_id: str) -> Chat | None:
 
 def get_chats(
     db: Session,
-    user_id: str = DEFAULT_USER_ID,
+    user_id: str,
     limit: int = 50,
     offset: int = 0,
 ) -> list[Chat]:
@@ -80,6 +79,6 @@ def delete_message(db: Session, message_id: str) -> bool:
     return ChatMessageRepository(db).delete(message_id)
 
 
-def get_recent_chats(db: Session, user_id: str = DEFAULT_USER_ID, limit: int = 10) -> list[Chat]:
+def get_recent_chats(db: Session, user_id: str, limit: int = 10) -> list[Chat]:
     """Get most recent chats."""
     return ChatRepository(db).list_for_user(user_id=user_id, limit=limit)

@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    JSON,
     String,
     Text,
     text,
@@ -39,10 +40,10 @@ class HomeConnection(Base):
     )
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=lambda: str(uuid.uuid4())
+        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
     )
     home_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=True),
+        UUID(as_uuid=False),
         ForeignKey("homes.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -50,7 +51,7 @@ class HomeConnection(Base):
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     connection_type: Mapped[str] = mapped_column(String(50), nullable=False)
     connected_by: Mapped[str] = mapped_column(
-        UUID(as_uuid=True),
+        UUID(as_uuid=False),
         ForeignKey("users.id"),
         nullable=False,
     )
@@ -59,7 +60,10 @@ class HomeConnection(Base):
     token_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    scopes: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
+    scopes: Mapped[list[str] | None] = mapped_column(
+        ARRAY(Text).with_variant(JSON, "sqlite"),
+        nullable=True,
+    )
     provider_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     connected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("NOW()"), nullable=False
@@ -94,17 +98,19 @@ class McpServerSettings(Base):
     )
 
     id: Mapped[str] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=lambda: str(uuid.uuid4())
+        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
     )
     home_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=True),
+        UUID(as_uuid=False),
         ForeignKey("homes.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
     mcp_server_id: Mapped[str] = mapped_column(String(100), nullable=False)
     settings_json: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, server_default=text("'{}'"), nullable=False
+        JSONB().with_variant(JSON, "sqlite"),
+        server_default=text("'{}'"),
+        nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("NOW()"), nullable=False
