@@ -134,7 +134,7 @@ async def _run_hsa_receipt_workflow(
         service_date=parsed_data.get("service_date"),
         paid_date=parsed_data.get("paid_date"),
         amount=float(parsed_data.get("amount", 0)),
-        hsa_eligible=bool(parsed_data.get("hsa_eligible", True)),
+        hsa_eligible=parsed_data.get("hsa_eligible", True),
         raw_model_output=raw_output,
     )
     parsed_receipt = ParsedReceipt(
