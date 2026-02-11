@@ -45,6 +45,14 @@ class Home(Base):
         back_populates="home",
         cascade="all, delete-orphan",
     )
+    connections: Mapped[list["HomeConnection"]] = relationship(
+        back_populates="home",
+        cascade="all, delete-orphan",
+    )
+    mcp_settings: Mapped[list["McpServerSettings"]] = relationship(
+        back_populates="home",
+        cascade="all, delete-orphan",
+    )
 
 
 class User(Base):

@@ -152,16 +152,22 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:3001"]
     
+    # Encryption key for sensitive data at rest
+    encryption_key: str = ""
+    
     # Google OAuth settings
     google_client_id: str = ""
     google_client_secret: str = ""
-    google_refresh_token: str = ""
+    # Note: google_refresh_token is now stored per-home in home_connections table
     google_oauth_redirect_uri: str = "http://localhost:8000/api/v1/integrations/google/oauth/callback"
     google_oauth_success_redirect: str = "http://localhost:3000/settings?google=connected"
     google_oauth_error_redirect: str = "http://localhost:3000/settings?google=error"
+    # Note: token store path is now deprecated; tokens stored in DB
     google_oauth_token_store_path: str = "/tmp/vivian-uploads/google-oauth.json"
     
     # MCP Google Drive/Sheets settings
+    # Note: These are now stored per-home in mcp_server_settings table
+    # These env vars serve as defaults/fallbacks
     mcp_drive_root_folder_id: str = ""
     mcp_sheets_spreadsheet_id: str = ""
     mcp_sheets_worksheet_name: str = "HSA_Ledger"
