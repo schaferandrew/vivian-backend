@@ -158,7 +158,7 @@ class Settings(BaseSettings):
     # Google OAuth settings
     google_client_id: str = ""
     google_client_secret: str = ""
-    # Note: google_refresh_token is now stored per-home in home_connections table
+    google_refresh_token: str = ""  # Deprecated: now stored in home_connections table
     google_oauth_redirect_uri: str = "http://localhost:8000/api/v1/integrations/google/oauth/callback"
     google_oauth_success_redirect: str = "http://localhost:3000/settings?google=connected"
     google_oauth_error_redirect: str = "http://localhost:3000/settings?google=error"

@@ -117,7 +117,11 @@ def apply_google_credentials_to_process_env(settings: Settings) -> None:
 
 
 def build_mcp_env(settings: Settings) -> dict[str, str]:
-    """Build environment for MCP subprocess with latest Google credentials."""
+    """Build environment for MCP subprocess with latest Google credentials.
+    
+    Note: This legacy function reads from env vars. Use build_mcp_env_from_db()
+    for database-backed configuration.
+    """
     env = dict(os.environ)
 
     client_id = get_google_client_id(settings)
@@ -144,6 +148,99 @@ def build_mcp_env(settings: Settings) -> dict[str, str]:
     if settings.mcp_sheets_worksheet_name:
         env["VIVIAN_MCP_SHEETS_WORKSHEET_NAME"] = settings.mcp_sheets_worksheet_name
 
+    return env
+
+
+async def build_mcp_env_from_db(
+    home_id: str,
+    mcp_server_id: str,
+    db: "Session",
+    settings: Settings,
+) -> dict[str, str]:
+    """Build environment for MCP subprocess using database configuration.
+    
+    This is the preferred method for building MCP environment as it uses
+    per-home connections and settings stored in the database.
+    
+    Args:
+        home_id: The home ID to load configuration for
+        mcp_server_id: The MCP server ID to load settings for
+        db: Database session
+        settings: Application settings (for client credentials)
+        
+    Returns:
+        Environment dict for MCP subprocess
+    """
+    from vivian_api.repositories.connection_repository import (
+        HomeConnectionRepository,
+        McpServerSettingsRepository,
+    )
+    
+    env = dict(os.environ)
+    
+    # Load connection tokens from database
+    connection_repo = HomeConnectionRepository(db)
+    connection = connection_repo.get_by_home_and_provider(
+        home_id=home_id,
+        provider="google",
+        connection_type="drive_sheets",
+    )
+    
+    client_id = get_google_client_id(settings)
+    client_secret = get_google_client_secret(settings)
+    
+    if client_id:
+        env["VIVIAN_MCP_GOOGLE_CLIENT_ID"] = client_id
+    if client_secret:
+        env["VIVIAN_MCP_GOOGLE_CLIENT_SECRET"] = client_secret
+    
+    if connection:
+        # Use database-stored tokens
+        refresh_token = connection_repo.get_decrypted_refresh_token(connection)
+        if refresh_token:
+            env["VIVIAN_MCP_GOOGLE_REFRESH_TOKEN"] = refresh_token
+        
+        # Load MCP server settings from database
+        settings_repo = McpServerSettingsRepository(db)
+        mcp_settings = settings_repo.get_by_home_and_server(home_id, mcp_server_id)
+        
+        if mcp_settings and mcp_settings.settings_json:
+            # Map settings_json keys to environment variables
+            # Expected keys: google_spreadsheet_id, google_worksheet_name,
+            # drive_root_folder_id, reimbursed_folder_id, unreimbursed_folder_id, not_eligible_folder_id
+            settings_map = {
+                "google_spreadsheet_id": "VIVIAN_MCP_SHEETS_SPREADSHEET_ID",
+                "google_worksheet_name": "VIVIAN_MCP_SHEETS_WORKSHEET_NAME",
+                "drive_root_folder_id": "VIVIAN_MCP_DRIVE_ROOT_FOLDER_ID",
+                "reimbursed_folder_id": "VIVIAN_MCP_REIMBURSED_FOLDER_ID",
+                "unreimbursed_folder_id": "VIVIAN_MCP_UNREIMBURSED_FOLDER_ID",
+                "not_eligible_folder_id": "VIVIAN_MCP_NOT_ELIGIBLE_FOLDER_ID",
+            }
+            
+            for settings_key, env_key in settings_map.items():
+                value = mcp_settings.settings_json.get(settings_key)
+                if value:
+                    env[env_key] = str(value)
+    
+    # Fall back to settings/env vars if not found in database
+    if "VIVIAN_MCP_GOOGLE_REFRESH_TOKEN" not in env:
+        refresh_token = get_google_refresh_token(settings)
+        if refresh_token:
+            env["VIVIAN_MCP_GOOGLE_REFRESH_TOKEN"] = refresh_token
+    
+    if "VIVIAN_MCP_DRIVE_ROOT_FOLDER_ID" not in env and settings.mcp_drive_root_folder_id:
+        env["VIVIAN_MCP_DRIVE_ROOT_FOLDER_ID"] = settings.mcp_drive_root_folder_id
+    if "VIVIAN_MCP_REIMBURSED_FOLDER_ID" not in env and settings.mcp_reimbursed_folder_id:
+        env["VIVIAN_MCP_REIMBURSED_FOLDER_ID"] = settings.mcp_reimbursed_folder_id
+    if "VIVIAN_MCP_UNREIMBURSED_FOLDER_ID" not in env and settings.mcp_unreimbursed_folder_id:
+        env["VIVIAN_MCP_UNREIMBURSED_FOLDER_ID"] = settings.mcp_unreimbursed_folder_id
+    if "VIVIAN_MCP_NOT_ELIGIBLE_FOLDER_ID" not in env and settings.mcp_not_eligible_folder_id:
+        env["VIVIAN_MCP_NOT_ELIGIBLE_FOLDER_ID"] = settings.mcp_not_eligible_folder_id
+    if "VIVIAN_MCP_SHEETS_SPREADSHEET_ID" not in env and settings.mcp_sheets_spreadsheet_id:
+        env["VIVIAN_MCP_SHEETS_SPREADSHEET_ID"] = settings.mcp_sheets_spreadsheet_id
+    if "VIVIAN_MCP_SHEETS_WORKSHEET_NAME" not in env and settings.mcp_sheets_worksheet_name:
+        env["VIVIAN_MCP_SHEETS_WORKSHEET_NAME"] = settings.mcp_sheets_worksheet_name
+    
     return env
 
 
