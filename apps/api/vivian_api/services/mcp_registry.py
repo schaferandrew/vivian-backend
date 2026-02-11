@@ -21,6 +21,8 @@ class MCPServerDefinition:
     default_enabled: bool
     tools: list[str]
     source: str = "builtin"
+    requires_connection: str | None = None  # e.g., "google" for Google OAuth
+    settings_schema: list[dict[str, Any]] | None = None
 
 
 def _load_custom_server_definitions(settings: Settings) -> dict[str, MCPServerDefinition]:
@@ -53,6 +55,10 @@ def _load_custom_server_definitions(settings: Settings) -> dict[str, MCPServerDe
         if not isinstance(tools, list):
             tools = []
 
+        settings_schema = item.get("settings_schema")
+        if settings_schema and not isinstance(settings_schema, list):
+            settings_schema = None
+            
         custom_defs[server_id] = MCPServerDefinition(
             id=server_id,
             name=str(item.get("name") or server_id),
@@ -62,6 +68,8 @@ def _load_custom_server_definitions(settings: Settings) -> dict[str, MCPServerDe
             default_enabled=bool(item.get("default_enabled", False)),
             tools=[str(v) for v in tools if str(v).strip()],
             source="custom",
+            requires_connection=item.get("requires_connection"),
+            settings_schema=settings_schema,
         )
 
     return custom_defs
@@ -73,7 +81,7 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
         "vivian_hsa": MCPServerDefinition(
             id="vivian_hsa",
             name="Vivian HSA",
-            description="Drive + Sheets tools for receipt workflows.",
+            description="Drive + Sheets tools for HSA receipt workflows.",
             command=["python", "-m", "vivian_mcp.server"],
             server_path=settings.resolve_mcp_server_path("mcp-server"),
             default_enabled=True,
@@ -86,6 +94,15 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
                 "bulk_import_receipts",
             ],
             source="builtin",
+            requires_connection="google",
+            settings_schema=[
+                {"key": "google_spreadsheet_id", "label": "Google Spreadsheet ID", "type": "string", "required": True},
+                {"key": "google_worksheet_name", "label": "Worksheet Name", "type": "string", "required": True, "default": "HSA_Ledger"},
+                {"key": "drive_root_folder_id", "label": "Drive Root Folder ID", "type": "string", "required": True},
+                {"key": "reimbursed_folder_id", "label": "Reimbursed Folder ID", "type": "string", "required": True},
+                {"key": "unreimbursed_folder_id", "label": "Unreimbursed Folder ID", "type": "string", "required": True},
+                {"key": "not_eligible_folder_id", "label": "Not Eligible Folder ID", "type": "string", "required": False},
+            ],
         ),
         "test_addition": MCPServerDefinition(
             id="test_addition",
