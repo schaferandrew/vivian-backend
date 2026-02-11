@@ -34,11 +34,11 @@ def validate_temp_file_path(file_path: str, temp_upload_dir: str) -> Path:
         resolved_path = Path(file_path).resolve()
         temp_root = Path(temp_upload_dir).resolve()
     except (OSError, RuntimeError) as e:
-        raise InvalidFilePathError(f"Invalid file path: {e}") from e
+        raise InvalidFilePathError("Invalid file path") from e
     
     # Ensure temp root exists
     if not temp_root.exists():
-        raise InvalidFilePathError(f"Temp upload directory does not exist: {temp_upload_dir}")
+        raise InvalidFilePathError("Temp upload directory configuration error")
     
     # Check if the resolved path is within the temp upload directory
     # Using 'in parents' check plus equality check for the file being directly in temp_root
@@ -46,7 +46,7 @@ def validate_temp_file_path(file_path: str, temp_upload_dir: str) -> Path:
         # Path is valid - within temp directory
         if not resolved_path.exists():
             logger.warning("Temp file not found during validation (may have been deleted)")
-            raise FileNotFoundError(f"File not found: {file_path}")
+            raise FileNotFoundError("File not found")
         
         # Ensure it's a regular file, not a directory
         if not resolved_path.is_file():
@@ -60,7 +60,4 @@ def validate_temp_file_path(file_path: str, temp_upload_dir: str) -> Path:
         "Path traversal attempt blocked: attempted to access file outside temp directory",
         extra={"temp_root": str(temp_root)}
     )
-    raise InvalidFilePathError(
-        f"File path is outside temp upload directory. "
-        f"Path: {resolved_path}, Allowed directory: {temp_root}"
-    )
+    raise InvalidFilePathError("File path is outside allowed directory")

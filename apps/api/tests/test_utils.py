@@ -30,7 +30,7 @@ class TestValidateTempFilePath:
             with pytest.raises(InvalidFilePathError) as exc_info:
                 validate_temp_file_path(outside_path, temp_dir)
             
-            assert "outside temp upload directory" in str(exc_info.value).lower()
+            assert "outside allowed directory" in str(exc_info.value).lower()
 
     def test_path_traversal_rejected(self):
         """Test that path traversal attempts are rejected."""
@@ -45,7 +45,7 @@ class TestValidateTempFilePath:
             with pytest.raises(InvalidFilePathError) as exc_info:
                 validate_temp_file_path(traversal_path, temp_dir)
             
-            assert "outside temp upload directory" in str(exc_info.value).lower()
+            assert "outside allowed directory" in str(exc_info.value).lower()
 
     def test_nonexistent_file_raises_filenotfound(self):
         """Test that nonexistent files raise FileNotFoundError."""
@@ -73,7 +73,7 @@ class TestValidateTempFilePath:
             with pytest.raises(InvalidFilePathError) as exc_info:
                 validate_temp_file_path(str(symlink_path), temp_dir)
             
-            assert "outside temp upload directory" in str(exc_info.value).lower()
+            assert "outside allowed directory" in str(exc_info.value).lower()
 
     def test_file_directly_in_temp_root(self):
         """Test that a file directly in temp root is accepted."""
@@ -105,7 +105,7 @@ class TestValidateTempFilePath:
         with pytest.raises(InvalidFilePathError) as exc_info:
             validate_temp_file_path(str(test_file), temp_dir)
         
-        assert "does not exist" in str(exc_info.value).lower()
+        assert "configuration error" in str(exc_info.value).lower()
 
     def test_directory_path_rejected(self):
         """Test that a directory path (not a file) is rejected."""
