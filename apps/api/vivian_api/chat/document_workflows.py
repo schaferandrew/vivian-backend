@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import Any, Awaitable, Callable, Literal
 
@@ -12,9 +13,11 @@ from vivian_api.config import Settings
 from vivian_api.services.mcp_client import MCPClient
 from vivian_api.services.mcp_registry import get_mcp_server_definitions
 from vivian_api.services.receipt_parser import OpenRouterService
+from vivian_api.utils import validate_temp_file_path, InvalidFilePathError
 from vivian_shared.models import ExpenseSchema, ParsedReceipt
 
 
+logger = logging.getLogger(__name__)
 DocumentType = Literal["hsa_receipt", "charitable_receipt"]
 
 
@@ -92,8 +95,31 @@ async def _run_hsa_receipt_workflow(
     tools_called: list[dict[str, str]] = []
     parser = OpenRouterService()
 
+    # Validate file path to prevent path traversal attacks
     try:
-        parse_result = await parser.parse_receipt(attachment.temp_file_path)
+        validated_path = validate_temp_file_path(
+            attachment.temp_file_path,
+            settings.temp_upload_dir
+        )
+    except (InvalidFilePathError, FileNotFoundError) as exc:
+        logger.warning(
+            "File validation failed for chat attachment",
+            extra={"attachment_id": attachment.attachment_id, "error_type": type(exc).__name__}
+        )
+        return (
+            DocumentWorkflowArtifact(
+                attachment_id=attachment.attachment_id,
+                document_type=attachment.document_type,
+                status="parse_error",
+                message="Could not access the uploaded file. Please try uploading again.",
+                temp_file_path=attachment.temp_file_path,
+                filename=attachment.filename,
+            ),
+            tools_called,
+        )
+
+    try:
+        parse_result = await parser.parse_receipt(str(validated_path))
     except Exception as exc:
         return (
             DocumentWorkflowArtifact(
