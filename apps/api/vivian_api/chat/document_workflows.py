@@ -191,14 +191,14 @@ async def _run_hsa_receipt_workflow(
     duplicate_info: list[dict[str, Any]] = []
     is_duplicate = False
 
-    definition = get_mcp_server_definitions(settings).get("vivian_receipt_tool")
+    definition = get_mcp_server_definitions(settings).get("hsa_ledger")
     if expense.hsa_eligible:
-        if "vivian_receipt_tool" not in enabled_mcp_servers:
+        if "hsa_ledger" not in enabled_mcp_servers:
             duplicate_check_error = (
-                "Vivian Receipt Tool MCP server is disabled in this chat. Enable it to run duplicate checks."
+                "HSA Ledger MCP server is disabled or not configured. Enable it and set required folder/sheet IDs to run duplicate checks."
             )
         elif not definition:
-            duplicate_check_error = "Vivian Receipt Tool MCP server configuration is unavailable."
+            duplicate_check_error = "HSA Ledger MCP server configuration is unavailable."
         else:
             mcp_client = MCPClient(
                 definition.command,
