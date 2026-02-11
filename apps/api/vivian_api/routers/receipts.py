@@ -1,5 +1,6 @@
 """Receipt upload and parsing router."""
 
+import logging
 import shutil
 import uuid
 from pathlib import Path
@@ -32,6 +33,7 @@ from vivian_api.utils import validate_temp_file_path, InvalidFilePathError
 from vivian_shared.models import ParsedReceipt, ExpenseSchema, ReimbursementStatus
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/receipts",
     tags=["receipts"],
@@ -169,6 +171,10 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
             settings.temp_upload_dir
         )
     except (InvalidFilePathError, FileNotFoundError) as exc:
+        logger.warning(
+            "File validation failed in confirm receipt endpoint",
+            extra={"error_type": type(exc).__name__}
+        )
         raise HTTPException(
             status_code=400,
             detail="Invalid or inaccessible file. Please ensure the file was uploaded correctly."

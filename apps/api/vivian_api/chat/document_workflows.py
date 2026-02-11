@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import Any, Awaitable, Callable, Literal
 
@@ -16,6 +17,7 @@ from vivian_api.utils import validate_temp_file_path, InvalidFilePathError
 from vivian_shared.models import ExpenseSchema, ParsedReceipt
 
 
+logger = logging.getLogger(__name__)
 DocumentType = Literal["hsa_receipt", "charitable_receipt"]
 
 
@@ -100,6 +102,10 @@ async def _run_hsa_receipt_workflow(
             settings.temp_upload_dir
         )
     except (InvalidFilePathError, FileNotFoundError) as exc:
+        logger.warning(
+            "File validation failed for chat attachment",
+            extra={"attachment_id": attachment.attachment_id, "error_type": type(exc).__name__}
+        )
         return (
             DocumentWorkflowArtifact(
                 attachment_id=attachment.attachment_id,

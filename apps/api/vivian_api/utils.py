@@ -1,6 +1,10 @@
 """Utility functions for the Vivian API."""
 
+import logging
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 
 class InvalidFilePathError(ValueError):
@@ -41,15 +45,21 @@ def validate_temp_file_path(file_path: str, temp_upload_dir: str) -> Path:
     if resolved_path == temp_root or temp_root in resolved_path.parents:
         # Path is valid - within temp directory
         if not resolved_path.exists():
+            logger.warning("Temp file not found during validation (may have been deleted)")
             raise FileNotFoundError(f"File not found: {file_path}")
         
         # Ensure it's a regular file, not a directory
         if not resolved_path.is_file():
+            logger.warning("Attempted to validate directory path as file")
             raise InvalidFilePathError("Path must be a regular file, not a directory")
         
         return resolved_path
     
-    # Path is outside the allowed directory
+    # Path is outside the allowed directory - potential security issue
+    logger.warning(
+        "Path traversal attempt blocked: attempted to access file outside temp directory",
+        extra={"temp_root": str(temp_root)}
+    )
     raise InvalidFilePathError(
         f"File path is outside temp upload directory. "
         f"Path: {resolved_path}, Allowed directory: {temp_root}"

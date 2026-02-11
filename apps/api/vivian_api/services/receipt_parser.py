@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -11,6 +12,7 @@ from vivian_api.config import Settings
 from vivian_api.utils import validate_temp_file_path, InvalidFilePathError
 
 
+logger = logging.getLogger(__name__)
 RECEIPT_PARSING_PROMPT = """You are a receipt parsing assistant. Extract the following information from this medical receipt:
 
 1. Provider: Medical provider or facility name
@@ -57,6 +59,10 @@ class OpenRouterService:
                 self.settings.temp_upload_dir
             )
         except (InvalidFilePathError, FileNotFoundError) as exc:
+            logger.warning(
+                "File validation failed in receipt parser",
+                extra={"error_type": type(exc).__name__}
+            )
             return {
                 "success": False,
                 "error": "Invalid or inaccessible file. Please ensure the file was uploaded correctly.",
