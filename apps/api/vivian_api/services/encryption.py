@@ -25,7 +25,7 @@ class EncryptionService:
     _instance: "EncryptionService | None" = None
     _fernet: "Fernet | None" = None
 
-    def __new__(cls) -> EncryptionService:
+    def __new__(cls) -> "EncryptionService":
         """Singleton pattern to avoid re-deriving key multiple times."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
