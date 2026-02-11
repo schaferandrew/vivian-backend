@@ -169,6 +169,11 @@ class Settings(BaseSettings):
     mcp_unreimbursed_folder_id: str = ""
     mcp_not_eligible_folder_id: str = ""
     
+    # Charitable donation settings
+    charitable_drive_folder_id: str = ""
+    charitable_spreadsheet_id: str = ""
+    charitable_worksheet_name: str = "Charitable_Ledger"
+    
     class Config:
         env_file = ".env"
         env_prefix = "VIVIAN_API_"
@@ -191,6 +196,9 @@ class Settings(BaseSettings):
             "mcp_not_eligible_folder_id": "VIVIAN_MCP_NOT_ELIGIBLE_FOLDER_ID",
             "mcp_sheets_spreadsheet_id": "VIVIAN_MCP_SHEETS_SPREADSHEET_ID",
             "mcp_sheets_worksheet_name": "VIVIAN_MCP_SHEETS_WORKSHEET_NAME",
+            "charitable_drive_folder_id": "VIVIAN_MCP_CHARITABLE_DRIVE_FOLDER_ID",
+            "charitable_spreadsheet_id": "VIVIAN_MCP_CHARITABLE_SPREADSHEET_ID",
+            "charitable_worksheet_name": "VIVIAN_MCP_CHARITABLE_WORKSHEET_NAME",
         }
         for field_name, env_name in fallback_env.items():
             if not getattr(self, field_name):
