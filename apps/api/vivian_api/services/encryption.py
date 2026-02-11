@@ -22,8 +22,8 @@ class EncryptionService:
       with same key, which is acceptable for our use case)
     """
 
-    _instance: EncryptionService | None = None
-    _fernet: Fernet | None = None
+    _instance: "EncryptionService | None" = None
+    _fernet: "Fernet | None" = None
 
     def __new__(cls) -> EncryptionService:
         """Singleton pattern to avoid re-deriving key multiple times."""
