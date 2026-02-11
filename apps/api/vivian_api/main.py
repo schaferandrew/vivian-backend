@@ -11,6 +11,10 @@ from vivian_api.routers import mcp, integrations
 from vivian_api.chat import chat_router, history_router
 from vivian_api.auth.router import router as auth_router
 from vivian_api.models.schemas import HealthCheckResponse
+from vivian_api.services.temp_cleanup import (
+    start_cleanup_service,
+    stop_cleanup_service,
+)
 
 
 settings = Settings()
@@ -22,9 +26,15 @@ async def lifespan(app: FastAPI):
     # Startup
     import os
     os.makedirs(settings.temp_upload_dir, exist_ok=True)
+    
+    # Start temp file cleanup service
+    await start_cleanup_service(settings)
+    
     yield
+    
     # Shutdown
-    # Cleanup temp files if needed
+    # Stop temp file cleanup service
+    await stop_cleanup_service()
 
 
 app = FastAPI(

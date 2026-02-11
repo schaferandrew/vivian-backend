@@ -146,6 +146,12 @@ class Settings(BaseSettings):
     # Temp storage
     temp_upload_dir: str = "/tmp/vivian-uploads"
     
+    # Temp cleanup settings
+    temp_cleanup_ttl_hours: int = 24  # Delete files older than this
+    temp_cleanup_interval_minutes: int = 15  # How often to run cleanup
+    temp_cleanup_max_bytes: int = 2147483648  # 2GB max temp dir size
+    temp_cleanup_on_start: bool = False  # Dev-only: clean on startup
+    
     # Confidence threshold for human review
     confidence_threshold: float = 0.85
     
