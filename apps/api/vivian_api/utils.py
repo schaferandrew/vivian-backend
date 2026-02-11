@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 
 class InvalidFilePathError(ValueError):
     """Raised when a file path is invalid or outside allowed directories."""
-    pass
 
 
 def validate_temp_file_path(file_path: str, temp_upload_dir: str) -> Path:
