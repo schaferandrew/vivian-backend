@@ -138,7 +138,7 @@ class Settings(BaseSettings):
     mcp_server_path: str = "/mcp-server"
     # MCP servers root path for registry-discovered servers.
     mcp_servers_root_path: str = "/mcp-servers"
-    mcp_default_enabled_servers: str = "vivian_hsa"
+    mcp_default_enabled_servers: str = "vivian_receipt_tool"
     # JSON array for future custom server definitions.
     mcp_custom_servers_json: str = ""
     user_location: str = ""
@@ -164,10 +164,8 @@ class Settings(BaseSettings):
     # MCP Google Drive/Sheets settings
     mcp_drive_root_folder_id: str = ""
     mcp_sheets_spreadsheet_id: str = ""
-    mcp_sheets_worksheet_name: str = "HSA_Ledger"
     mcp_reimbursed_folder_id: str = ""
     mcp_unreimbursed_folder_id: str = ""
-    mcp_not_eligible_folder_id: str = ""
     
     # Charitable donation settings
     charitable_drive_folder_id: str = ""
@@ -193,9 +191,7 @@ class Settings(BaseSettings):
             "mcp_drive_root_folder_id": "VIVIAN_MCP_DRIVE_ROOT_FOLDER_ID",
             "mcp_reimbursed_folder_id": "VIVIAN_MCP_REIMBURSED_FOLDER_ID",
             "mcp_unreimbursed_folder_id": "VIVIAN_MCP_UNREIMBURSED_FOLDER_ID",
-            "mcp_not_eligible_folder_id": "VIVIAN_MCP_NOT_ELIGIBLE_FOLDER_ID",
             "mcp_sheets_spreadsheet_id": "VIVIAN_MCP_SHEETS_SPREADSHEET_ID",
-            "mcp_sheets_worksheet_name": "VIVIAN_MCP_SHEETS_WORKSHEET_NAME",
             "charitable_drive_folder_id": "VIVIAN_MCP_CHARITABLE_DRIVE_FOLDER_ID",
             "charitable_spreadsheet_id": "VIVIAN_MCP_CHARITABLE_SPREADSHEET_ID",
             "charitable_worksheet_name": "VIVIAN_MCP_CHARITABLE_WORKSHEET_NAME",

@@ -66,7 +66,7 @@ async def get_unreimbursed_balance(
     mcp_client = await MCPClient.from_db(
         server_command=["python", "-m", "vivian_mcp.server"],
         home_id=home_id,
-        mcp_server_id="vivian_hsa",
+        mcp_server_id="vivian_receipt_tool",
         db=db,
     )
     await mcp_client.start()
@@ -116,7 +116,7 @@ async def get_ledger_summary(
     mcp_client = await MCPClient.from_db(
         server_command=["python", "-m", "vivian_mcp.server"],
         home_id=home_id,
-        mcp_server_id="vivian_hsa",
+        mcp_server_id="vivian_receipt_tool",
         db=db,
     )
     await mcp_client.start()

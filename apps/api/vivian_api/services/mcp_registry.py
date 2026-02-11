@@ -70,10 +70,10 @@ def _load_custom_server_definitions(settings: Settings) -> dict[str, MCPServerDe
 def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinition]:
     """Return available MCP servers keyed by stable ID."""
     definitions: dict[str, MCPServerDefinition] = {
-        "vivian_hsa": MCPServerDefinition(
-            id="vivian_hsa",
-            name="Vivian HSA",
-            description="Drive + Sheets tools for receipt workflows.",
+        "vivian_receipt_tool": MCPServerDefinition(
+            id="vivian_receipt_tool",
+            name="Vivian Receipt Tool",
+            description="Drive + Sheets tools for receipt and charitable donation workflows.",
             command=["python", "-m", "vivian_mcp.server"],
             server_path=settings.resolve_mcp_server_path("mcp-server"),
             default_enabled=True,
@@ -84,6 +84,10 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
                 "update_expense_status",
                 "get_unreimbursed_balance",
                 "bulk_import_receipts",
+                "upload_charitable_receipt_to_drive",
+                "append_charitable_donation_to_ledger",
+                "check_charitable_duplicates",
+                "get_charitable_summary",
             ],
             source="builtin",
         ),
