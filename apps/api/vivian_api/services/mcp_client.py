@@ -21,13 +21,52 @@ class MCPClient:
         server_command: list[str],
         process_env: Optional[dict[str, str]] = None,
         server_path_override: Optional[str] = None,
+        mcp_server_id: Optional[str] = None,
     ):
         self.server_command = server_command
         self.process_env = process_env
         self.server_path_override = server_path_override
+        self.mcp_server_id = mcp_server_id
         self._session: Optional[ClientSession] = None
         self._stdio_cm: Optional[AbstractAsyncContextManager] = None
         self._session_started = False
+    
+    @classmethod
+    async def from_db(
+        cls,
+        server_command: list[str],
+        home_id: str,
+        mcp_server_id: str,
+        db: "Session",
+        server_path_override: Optional[str] = None,
+    ) -> "MCPClient":
+        """Create an MCPClient with database-backed configuration.
+        
+        This factory method loads Google connection tokens and MCP settings
+        from the database and builds the environment for the subprocess.
+        
+        Args:
+            server_command: The MCP server command to run
+            home_id: The home ID to load configuration for
+            mcp_server_id: The MCP server ID to load settings for
+            db: Database session
+            server_path_override: Optional path override for server CWD
+            
+        Returns:
+            Configured MCPClient instance
+        """
+        from vivian_api.config import Settings
+        from vivian_api.services.google_integration import build_mcp_env_from_db
+        
+        settings = Settings()
+        env = await build_mcp_env_from_db(home_id, mcp_server_id, db, settings)
+        
+        return cls(
+            server_command=server_command,
+            process_env=env,
+            server_path_override=server_path_override,
+            mcp_server_id=mcp_server_id,
+        )
     
     async def start(self):
         """Start the MCP server process."""
