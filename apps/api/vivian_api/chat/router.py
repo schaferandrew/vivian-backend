@@ -8,9 +8,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 import httpx
 import re
-from datetime import datetime, timezone
 
 from vivian_api.chat.connection import connection_manager
+from vivian_api.chat.document_workflows import (
+    ChatAttachment,
+    DocumentWorkflowArtifact,
+    execute_document_workflows,
+)
 from vivian_api.chat.session import session_manager
 from vivian_api.chat.handler import chat_handler
 from vivian_api.chat.message_protocol import ChatMessage
@@ -40,6 +44,7 @@ class ChatRequest(BaseModel):
     chat_id: str | None = None
     web_search_enabled: bool = False
     enabled_mcp_servers: list[str] = Field(default_factory=list)
+    attachments: list[ChatAttachment] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -47,6 +52,7 @@ class ChatResponse(BaseModel):
     session_id: str
     chat_id: str
     tools_called: list[dict[str, str]] = Field(default_factory=list)
+    document_workflows: list[DocumentWorkflowArtifact] = Field(default_factory=list)
 
 
 class ModelSelectRequest(BaseModel):
@@ -549,10 +555,17 @@ async def chat_message(
         request.enabled_mcp_servers,
         settings,
     )
+    attachment_metadata = [attachment.model_dump() for attachment in request.attachments]
+    user_metadata = {"attachments": attachment_metadata} if attachment_metadata else None
 
     # Store user message in PostgreSQL if chat exists
     if db_chat:
-        message_repo.create(chat_id=db_chat.id, role="user", content=request.message)
+        message_repo.create(
+            chat_id=db_chat.id,
+            role="user",
+            content=request.message,
+            metadata=user_metadata,
+        )
         # Set an immediate first-pass title from the first user message.
         if (db_chat.title or "").strip().lower() == "new chat":
             try:
@@ -570,7 +583,7 @@ async def chat_message(
         request.enabled_mcp_servers,
         settings,
     )
-    session.add_message(role="user", content=request.message)
+    session.add_message(role="user", content=request.message, metadata=user_metadata)
 
     # Convert session messages to OpenRouter format; prepend system prompt so model stays in character
     messages = [
@@ -589,44 +602,62 @@ async def chat_message(
     ]
 
     tools_called: list[dict[str, str]] = []
-    tool_response = await _try_addition_tool_response(
-        message=request.message,
-        enabled_mcp_servers=session.context.enabled_mcp_servers,
-    )
-    if tool_response:
-        response_text, tools_called = tool_response
+    document_workflows: list[DocumentWorkflowArtifact] = []
+    if request.attachments:
+        workflow_result = await execute_document_workflows(
+            attachments=request.attachments,
+            enabled_mcp_servers=session.context.enabled_mcp_servers,
+            settings=settings,
+        )
+        response_text = workflow_result.response_text
+        tools_called = workflow_result.tools_called
+        document_workflows = workflow_result.artifacts
     else:
-        # Get response from OpenRouter
-        # Use request's web_search_enabled setting (default False to avoid unexpected costs)
-        try:
-            response_text = await get_chat_completion(messages, web_search_enabled=request.web_search_enabled)
-        except OpenRouterCreditsError as e:
-            # Handle model not found (404) errors vs insufficient credits (402) errors
-            if "Model error" in e.message:
+        tool_response = await _try_addition_tool_response(
+            message=request.message,
+            enabled_mcp_servers=session.context.enabled_mcp_servers,
+        )
+        if tool_response:
+            response_text, tools_called = tool_response
+        else:
+            # Get response from OpenRouter
+            # Use request's web_search_enabled setting (default False to avoid unexpected costs)
+            try:
+                response_text = await get_chat_completion(messages, web_search_enabled=request.web_search_enabled)
+            except OpenRouterCreditsError as e:
+                # Handle model not found (404) errors vs insufficient credits (402) errors
+                if "Model error" in e.message:
+                    return JSONResponse(
+                        status_code=404,
+                        content={"error": "model_not_found", "message": e.message},
+                    )
                 return JSONResponse(
-                    status_code=404,
-                    content={"error": "model_not_found", "message": e.message},
+                    status_code=402,
+                    content={"error": "insufficient_credits", "message": e.message},
                 )
-            return JSONResponse(
-                status_code=402,
-                content={"error": "insufficient_credits", "message": e.message},
-            )
-        except OpenRouterRateLimitError as e:
-            return JSONResponse(
-                status_code=429,
-                content={"error": "rate_limit", "message": e.message},
-            )
-        except Exception as e:
-            print(f"Error getting chat completion: {e}")
-            import traceback
-            traceback.print_exc()
-            return JSONResponse(
-                status_code=500,
-                content={"error": "server_error", "message": str(e)},
-            )
+            except OpenRouterRateLimitError as e:
+                return JSONResponse(
+                    status_code=429,
+                    content={"error": "rate_limit", "message": e.message},
+                )
+            except Exception as e:
+                print(f"Error getting chat completion: {e}")
+                import traceback
+                traceback.print_exc()
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": "server_error", "message": str(e)},
+                )
 
     # Store assistant response in PostgreSQL if chat exists
-    assistant_metadata = {"tools_called": tools_called} if tools_called else None
+    assistant_metadata_payload: dict[str, object] = {}
+    if tools_called:
+        assistant_metadata_payload["tools_called"] = tools_called
+    if document_workflows:
+        assistant_metadata_payload["document_workflows"] = [
+            workflow.model_dump(mode="json") for workflow in document_workflows
+        ]
+    assistant_metadata = assistant_metadata_payload or None
     if db_chat:
         message_repo.create(
             chat_id=db_chat.id,
@@ -657,6 +688,7 @@ async def chat_message(
         session_id=session.session_id,
         chat_id=db_chat.id,
         tools_called=tools_called,
+        document_workflows=document_workflows,
     )
 
 
