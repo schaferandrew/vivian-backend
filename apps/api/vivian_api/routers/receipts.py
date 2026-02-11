@@ -28,6 +28,7 @@ from vivian_api.models.schemas import (
 )
 from vivian_api.services.receipt_parser import OpenRouterService
 from vivian_api.services.mcp_client import MCPClient
+from vivian_api.utils import validate_temp_file_path, InvalidFilePathError
 from vivian_shared.models import ParsedReceipt, ExpenseSchema, ReimbursementStatus
 
 
@@ -161,6 +162,18 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
     This is the final step after user confirmation/editing.
     Checks for duplicates before saving.
     """
+    # Validate file path to prevent path traversal attacks
+    try:
+        validated_path = validate_temp_file_path(
+            request.temp_file_path,
+            settings.temp_upload_dir
+        )
+    except (InvalidFilePathError, FileNotFoundError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file path: {exc}"
+        )
+    
     # Initialize MCP client
     mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
     await mcp_client.start()
@@ -228,10 +241,9 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
                 detail=f"Ledger update failed: {ledger_result.get('error')}"
             )
         
-        # Clean up temp file
-        temp_path = Path(request.temp_file_path)
-        if temp_path.exists():
-            temp_path.unlink()
+        # Clean up temp file (use validated path)
+        if validated_path.exists():
+            validated_path.unlink()
         
         return ConfirmReceiptResponse(
             success=True,
@@ -717,10 +729,16 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
 
             # Clean up imported temp files
             if status_label == "new" and temp_file_path:
-                temp_path = Path(temp_file_path).resolve()
-                temp_root = get_temp_dir().resolve()
-                if temp_path.exists() and temp_root in temp_path.parents:
-                    temp_path.unlink()
+                try:
+                    validated_path = validate_temp_file_path(
+                        temp_file_path,
+                        settings.temp_upload_dir
+                    )
+                    if validated_path.exists():
+                        validated_path.unlink()
+                except (InvalidFilePathError, FileNotFoundError):
+                    # If path validation fails, skip cleanup but don't fail the import
+                    pass
 
         imported_count = sum(1 for r in local_results if r.status == "new")
         failed_count = sum(1 for r in local_results if r.status in {"failed", "duplicate_exact", "duplicate_fuzzy"})
