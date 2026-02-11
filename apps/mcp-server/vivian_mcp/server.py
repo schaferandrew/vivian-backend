@@ -1,6 +1,7 @@
 """Vivian MCP Server - Household agent tools."""
 
 import asyncio
+import json
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -12,6 +13,7 @@ from mcp.types import Tool, TextContent
 
 from vivian_mcp.tools.hsa_tools import HSAToolManager
 from vivian_mcp.tools.drive_tools import DriveToolManager
+from vivian_mcp.tools.charitable_tools import CharitableToolManager
 from vivian_mcp.config import Settings
 
 
@@ -28,6 +30,7 @@ app = Server("vivian-mcp", lifespan=app_lifespan)
 # Initialize tool managers
 hsa_tools = HSAToolManager()
 drive_tools = DriveToolManager()
+charitable_tools = CharitableToolManager()
 
 
 @app.list_tools()
@@ -224,6 +227,89 @@ async def list_tools() -> list[Tool]:
                 "required": ["local_file_path", "status"]
             }
         ),
+        # Charitable Donation Tools
+        Tool(
+            name="upload_charitable_receipt_to_drive",
+            description="Upload a charitable donation receipt to Google Drive organized by tax year",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "local_file_path": {
+                        "type": "string",
+                        "description": "Local path to the receipt file"
+                    },
+                    "tax_year": {
+                        "type": "string",
+                        "description": "Tax year for folder organization (e.g., '2025')"
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "Optional custom filename"
+                    }
+                },
+                "required": ["local_file_path", "tax_year"]
+            }
+        ),
+        Tool(
+            name="append_charitable_donation_to_ledger",
+            description="Add a charitable donation to the Google Sheets ledger",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "donation_json": {
+                        "type": "object",
+                        "description": "Donation data (organization_name, donation_date, amount, tax_deductible, description)"
+                    },
+                    "drive_file_id": {
+                        "type": "string",
+                        "description": "Google Drive file ID for the receipt"
+                    },
+                    "check_duplicates": {
+                        "type": "boolean",
+                        "description": "Whether to check for duplicates before appending",
+                        "default": True
+                    },
+                    "force_append": {
+                        "type": "boolean",
+                        "description": "Whether to append even if duplicates are found",
+                        "default": False
+                    }
+                },
+                "required": ["donation_json", "drive_file_id"]
+            }
+        ),
+        Tool(
+            name="check_charitable_duplicates",
+            description="Check if a charitable donation is a duplicate of existing entries",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "donation_json": {
+                        "type": "object",
+                        "description": "Donation data to check for duplicates (organization_name, donation_date, amount)"
+                    },
+                    "fuzzy_days": {
+                        "type": "integer",
+                        "description": "Number of days to allow for fuzzy date matching",
+                        "default": 3
+                    }
+                },
+                "required": ["donation_json"]
+            }
+        ),
+        Tool(
+            name="get_charitable_summary",
+            description="Get summary of charitable donations by tax year",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tax_year": {
+                        "type": "string",
+                        "description": "Optional tax year to filter by (e.g., '2025')"
+                    }
+                }
+            }
+        ),
     ]
 
 
@@ -287,7 +373,38 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 arguments.get("filename")
             )
             return [TextContent(type="text", text=result)]
-            
+
+        # Charitable Donation Tools
+        elif name == "upload_charitable_receipt_to_drive":
+            result = await charitable_tools.upload_receipt_to_drive(
+                arguments["local_file_path"],
+                arguments["tax_year"],
+                arguments.get("filename")
+            )
+            return [TextContent(type="text", text=result)]
+
+        elif name == "append_charitable_donation_to_ledger":
+            result = await charitable_tools.append_donation_to_ledger(
+                arguments["donation_json"],
+                arguments["drive_file_id"],
+                arguments.get("check_duplicates", True),
+                arguments.get("force_append", False)
+            )
+            return [TextContent(type="text", text=result)]
+
+        elif name == "check_charitable_duplicates":
+            result = await charitable_tools.check_for_duplicates(
+                arguments["donation_json"],
+                arguments.get("fuzzy_days", 3)
+            )
+            return [TextContent(type="text", text=json.dumps(result))]
+
+        elif name == "get_charitable_summary":
+            result = await charitable_tools.get_donation_summary(
+                arguments.get("tax_year")
+            )
+            return [TextContent(type="text", text=result)]
+
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
             

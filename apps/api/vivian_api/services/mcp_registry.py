@@ -114,6 +114,27 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
             tools=["add_numbers"],
             source="builtin",
         ),
+        "vivian_charitable": MCPServerDefinition(
+            id="vivian_charitable",
+            name="Vivian Charitable Donations",
+            description="Drive + Sheets tools for charitable donation tracking.",
+            command=["python", "-m", "vivian_mcp.server"],
+            server_path=settings.resolve_mcp_server_path("mcp-server"),
+            default_enabled=False,
+            tools=[
+                "upload_charitable_receipt_to_drive",
+                "append_charitable_donation_to_ledger",
+                "check_charitable_duplicates",
+                "get_charitable_summary",
+            ],
+            source="builtin",
+            requires_connection="google",
+            settings_schema=[
+                {"key": "google_spreadsheet_id", "label": "Google Spreadsheet ID", "type": "string", "required": True},
+                {"key": "google_worksheet_name", "label": "Worksheet Name", "type": "string", "required": True, "default": "Charitable_Donations"},
+                {"key": "drive_root_folder_id", "label": "Drive Root Folder ID", "type": "string", "required": True},
+            ],
+        ),
     }
 
     # Future scaffolding: optional custom servers from settings JSON.
