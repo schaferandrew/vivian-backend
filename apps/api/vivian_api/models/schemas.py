@@ -4,7 +4,13 @@ from datetime import date
 from typing import Optional
 from pydantic import BaseModel, Field
 
-from vivian_shared.models import ExpenseSchema, ParsedReceipt, ReimbursementStatus
+from vivian_shared.models import (
+    ExpenseSchema,
+    ParsedReceipt,
+    ReimbursementStatus,
+    ExpenseCategory,
+    CharitableDonationSchema,
+)
 
 
 class ReceiptUploadResponse(BaseModel):
@@ -45,8 +51,10 @@ class CheckDuplicateResponse(BaseModel):
 class ConfirmReceiptRequest(BaseModel):
     """Request to confirm and save a parsed receipt."""
     temp_file_path: str
-    expense_data: ExpenseSchema
-    status: ReimbursementStatus
+    category: ExpenseCategory = ExpenseCategory.HSA
+    expense_data: Optional[ExpenseSchema] = None
+    charitable_data: Optional[CharitableDonationSchema] = None
+    status: Optional[ReimbursementStatus] = None
     reimbursement_date: Optional[date] = None
     notes: Optional[str] = None
     force: bool = Field(default=False, description="Force import even if duplicates detected")
@@ -94,7 +102,9 @@ class BulkImportFileResult(BaseModel):
     filename: str
     status: str = Field(..., description="Status: new, duplicate_exact, duplicate_fuzzy, flagged, failed, skipped")
     temp_file_path: Optional[str] = None
+    category: Optional[ExpenseCategory] = ExpenseCategory.HSA
     expense: Optional[ExpenseSchema] = None
+    charitable_data: Optional[CharitableDonationSchema] = None
     confidence: float = 0
     duplicate_info: Optional[list[DuplicateInfo]] = None
     error: Optional[str] = None
@@ -151,7 +161,9 @@ class BulkImportConfirmRequest(BaseModel):
 class BulkImportConfirmItem(BaseModel):
     """Single parsed item selected for bulk import."""
     temp_file_path: str
-    expense_data: ExpenseSchema
+    category: ExpenseCategory = ExpenseCategory.HSA
+    expense_data: Optional[ExpenseSchema] = None
+    charitable_data: Optional[CharitableDonationSchema] = None
     status: Optional[ReimbursementStatus] = None
 
 

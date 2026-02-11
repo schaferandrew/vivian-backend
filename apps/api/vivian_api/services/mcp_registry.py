@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vivian_api.config import Settings
@@ -22,7 +22,20 @@ class MCPServerDefinition:
     tools: list[str]
     source: str = "builtin"
     requires_connection: str | None = None  # e.g., "google" for Google OAuth
-    settings_schema: list[dict[str, Any]] | None = None
+    required_settings: list[dict[str, Any]] = field(default_factory=list)
+    # Each setting: {"key": str, "label": str, "type": "folder_id" | "spreadsheet_id" | "text"}
+
+
+@dataclass
+class MCPServerStatus:
+    """Runtime status of an MCP server for a specific home."""
+
+    server_id: str
+    enabled: bool
+    status: str  # "available" | "blocked" | "configured"
+    blocked_reason: str | None = None
+    settings: dict[str, str] = field(default_factory=dict)
+    required_settings: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _load_custom_server_definitions(settings: Settings) -> dict[str, MCPServerDefinition]:
@@ -55,10 +68,6 @@ def _load_custom_server_definitions(settings: Settings) -> dict[str, MCPServerDe
         if not isinstance(tools, list):
             tools = []
 
-        settings_schema = item.get("settings_schema")
-        if settings_schema and not isinstance(settings_schema, list):
-            settings_schema = None
-            
         custom_defs[server_id] = MCPServerDefinition(
             id=server_id,
             name=str(item.get("name") or server_id),
@@ -69,7 +78,7 @@ def _load_custom_server_definitions(settings: Settings) -> dict[str, MCPServerDe
             tools=[str(v) for v in tools if str(v).strip()],
             source="custom",
             requires_connection=item.get("requires_connection"),
-            settings_schema=settings_schema,
+            required_settings=item.get("required_settings", []),
         )
 
     return custom_defs
@@ -78,30 +87,49 @@ def _load_custom_server_definitions(settings: Settings) -> dict[str, MCPServerDe
 def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinition]:
     """Return available MCP servers keyed by stable ID."""
     definitions: dict[str, MCPServerDefinition] = {
-        "vivian_hsa": MCPServerDefinition(
-            id="vivian_hsa",
-            name="Vivian HSA",
+        "hsa_ledger": MCPServerDefinition(
+            id="hsa_ledger",
+            name="HSA Ledger",
             description="Drive + Sheets tools for HSA receipt workflows.",
             command=["python", "-m", "vivian_mcp.server"],
             server_path=settings.resolve_mcp_server_path("mcp-server"),
-            default_enabled=True,
+            default_enabled=False,  # Must be configured first
             tools=[
                 "upload_receipt_to_drive",
                 "append_expense_to_ledger",
                 "check_for_duplicates",
                 "update_expense_status",
                 "get_unreimbursed_balance",
+                "read_ledger_entries",
                 "bulk_import_receipts",
             ],
             source="builtin",
             requires_connection="google",
-            settings_schema=[
-                {"key": "google_spreadsheet_id", "label": "Google Spreadsheet ID", "type": "string", "required": True},
-                {"key": "google_worksheet_name", "label": "Worksheet Name", "type": "string", "required": True, "default": "HSA_Ledger"},
-                {"key": "drive_root_folder_id", "label": "Drive Root Folder ID", "type": "string", "required": True},
-                {"key": "reimbursed_folder_id", "label": "Reimbursed Folder ID", "type": "string", "required": True},
-                {"key": "unreimbursed_folder_id", "label": "Unreimbursed Folder ID", "type": "string", "required": True},
-                {"key": "not_eligible_folder_id", "label": "Not Eligible Folder ID", "type": "string", "required": False},
+            required_settings=[
+                {"key": "drive_reimbursed_folder_id", "label": "Reimbursed Folder ID", "type": "folder_id"},
+                {"key": "drive_unreimbursed_folder_id", "label": "Unreimbursed Folder ID", "type": "folder_id"},
+                {"key": "spreadsheet_id", "label": "Spreadsheet ID", "type": "spreadsheet_id"},
+            ],
+        ),
+        "charitable_ledger": MCPServerDefinition(
+            id="charitable_ledger",
+            name="Charitable Ledger",
+            description="Drive + Sheets tools for charitable donation workflows.",
+            command=["python", "-m", "vivian_mcp.server"],
+            server_path=settings.resolve_mcp_server_path("mcp-server"),
+            default_enabled=False,  # Must be configured first
+            tools=[
+                "upload_charitable_receipt_to_drive",
+                "append_charitable_donation_to_ledger",
+                "check_charitable_duplicates",
+                "get_charitable_summary",
+            ],
+            source="builtin",
+            requires_connection="google",
+            required_settings=[
+                {"key": "drive_folder_id", "label": "Drive Folder ID", "type": "folder_id"},
+                {"key": "spreadsheet_id", "label": "Spreadsheet ID", "type": "spreadsheet_id"},
+                {"key": "worksheet_name", "label": "Worksheet Name", "type": "text"},
             ],
         ),
         "test_addition": MCPServerDefinition(
@@ -113,27 +141,7 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
             default_enabled=False,
             tools=["add_numbers"],
             source="builtin",
-        ),
-        "vivian_charitable": MCPServerDefinition(
-            id="vivian_charitable",
-            name="Vivian Charitable Donations",
-            description="Drive + Sheets tools for charitable donation tracking.",
-            command=["python", "-m", "vivian_mcp.server"],
-            server_path=settings.resolve_mcp_server_path("mcp-server"),
-            default_enabled=False,
-            tools=[
-                "upload_charitable_receipt_to_drive",
-                "append_charitable_donation_to_ledger",
-                "check_charitable_duplicates",
-                "get_charitable_summary",
-            ],
-            source="builtin",
-            requires_connection="google",
-            settings_schema=[
-                {"key": "google_spreadsheet_id", "label": "Google Spreadsheet ID", "type": "string", "required": True},
-                {"key": "google_worksheet_name", "label": "Worksheet Name", "type": "string", "required": True, "default": "Charitable_Donations"},
-                {"key": "drive_root_folder_id", "label": "Drive Root Folder ID", "type": "string", "required": True},
-            ],
+            required_settings=[],
         ),
     }
 
@@ -142,11 +150,49 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
     return definitions
 
 
+def compute_server_status(
+    definition: MCPServerDefinition,
+    current_settings: dict[str, str],
+    enabled: bool,
+) -> MCPServerStatus:
+    """Compute the runtime status of a server based on settings."""
+    required = definition.required_settings
+    missing = []
+    
+    for setting in required:
+        key = setting["key"]
+        if not current_settings.get(key):
+            missing.append(setting["label"])
+    
+    if missing:
+        return MCPServerStatus(
+            server_id=definition.id,
+            enabled=False,  # Cannot be enabled if settings missing
+            status="blocked",
+            blocked_reason=f"Missing: {', '.join(missing)}",
+            settings=current_settings,
+            required_settings=required,
+        )
+    
+    return MCPServerStatus(
+        server_id=definition.id,
+        enabled=enabled,
+        status="available" if enabled else "configured",
+        blocked_reason=None,
+        settings=current_settings,
+        required_settings=required,
+    )
+
+
 def normalize_enabled_server_ids(
     requested_ids: list[str] | None,
     settings: Settings,
+    server_statuses: dict[str, MCPServerStatus],
 ) -> list[str]:
-    """Validate and normalize enabled server IDs against known registry."""
+    """Validate and normalize enabled server IDs against known registry.
+    
+    Only allows enabling servers that are not blocked.
+    """
     definitions = get_mcp_server_definitions(settings)
     allowed_ids = set(definitions.keys())
 
@@ -162,6 +208,14 @@ def normalize_enabled_server_ids(
             if definition.default_enabled
         ]
 
-    return list(
-        dict.fromkeys(server_id for server_id in requested_ids if server_id in allowed_ids)
-    )
+    # Filter out blocked servers
+    valid_ids = []
+    for server_id in requested_ids:
+        if server_id not in allowed_ids:
+            continue
+        status = server_statuses.get(server_id)
+        if status and status.status == "blocked":
+            continue  # Cannot enable blocked servers
+        valid_ids.append(server_id)
+
+    return list(dict.fromkeys(valid_ids))

@@ -14,7 +14,12 @@ from vivian_api.services.mcp_client import MCPClient
 from vivian_api.services.mcp_registry import get_mcp_server_definitions
 from vivian_api.services.receipt_parser import OpenRouterService
 from vivian_api.utils import validate_temp_file_path, InvalidFilePathError
-from vivian_shared.models import ExpenseSchema, ParsedReceipt
+from vivian_shared.models import (
+    ExpenseSchema,
+    ParsedReceipt,
+    ExpenseCategory,
+    CharitableDonationSchema,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -80,6 +85,18 @@ def _compute_receipt_confidence(parsed_data: dict[str, Any]) -> float:
     if not parsed_data.get("provider"):
         confidence -= 0.2
     if not parsed_data.get("service_date"):
+        confidence -= 0.2
+    if not parsed_data.get("amount") or parsed_data.get("amount") == 0:
+        confidence -= 0.3
+    return max(0, confidence)
+
+
+def _compute_charitable_confidence(parsed_data: dict[str, Any]) -> float:
+    """Confidence heuristic for charitable receipts."""
+    confidence = 0.9
+    if not parsed_data.get("organization_name"):
+        confidence -= 0.3
+    if not parsed_data.get("donation_date"):
         confidence -= 0.2
     if not parsed_data.get("amount") or parsed_data.get("amount") == 0:
         confidence -= 0.3
@@ -164,6 +181,7 @@ async def _run_hsa_receipt_workflow(
         raw_model_output=raw_output,
     )
     parsed_receipt = ParsedReceipt(
+        category=ExpenseCategory.HSA,
         expense=expense,
         confidence=confidence,
         parsing_errors=[] if confidence > 0.7 else ["Low confidence in some fields"],
@@ -173,14 +191,14 @@ async def _run_hsa_receipt_workflow(
     duplicate_info: list[dict[str, Any]] = []
     is_duplicate = False
 
-    definition = get_mcp_server_definitions(settings).get("vivian_hsa")
+    definition = get_mcp_server_definitions(settings).get("hsa_ledger")
     if expense.hsa_eligible:
-        if "vivian_hsa" not in enabled_mcp_servers:
+        if "hsa_ledger" not in enabled_mcp_servers:
             duplicate_check_error = (
-                "Vivian HSA MCP server is disabled in this chat. Enable it to run duplicate checks."
+                "HSA Ledger MCP server is disabled or not configured. Enable it and set required folder/sheet IDs to run duplicate checks."
             )
         elif not definition:
-            duplicate_check_error = "Vivian HSA MCP server configuration is unavailable."
+            duplicate_check_error = "HSA Ledger MCP server configuration is unavailable."
         else:
             mcp_client = MCPClient(
                 definition.command,
@@ -237,20 +255,97 @@ async def _run_charitable_receipt_workflow(
     _enabled_mcp_servers: list[str],
     _settings: Settings,
 ) -> tuple[DocumentWorkflowArtifact, list[dict[str, str]]]:
-    """Placeholder for future charitable receipt flow."""
+    """Parse a charitable receipt and prepare data for confirmation UI."""
+    tools_called: list[dict[str, str]] = []
+    parser = OpenRouterService()
+
+    try:
+        validated_path = validate_temp_file_path(
+            attachment.temp_file_path,
+            _settings.temp_upload_dir,
+        )
+    except (InvalidFilePathError, FileNotFoundError) as exc:
+        logger.warning(
+            "File validation failed for charitable attachment",
+            extra={"attachment_id": attachment.attachment_id, "error_type": type(exc).__name__},
+        )
+        return (
+            DocumentWorkflowArtifact(
+                attachment_id=attachment.attachment_id,
+                document_type=attachment.document_type,
+                status="parse_error",
+                message="Could not access the uploaded file. Please try uploading again.",
+                temp_file_path=attachment.temp_file_path,
+                filename=attachment.filename,
+            ),
+            tools_called,
+        )
+
+    try:
+        parse_result = await parser.parse_receipt(str(validated_path))
+    except Exception as exc:
+        return (
+            DocumentWorkflowArtifact(
+                attachment_id=attachment.attachment_id,
+                document_type=attachment.document_type,
+                status="parse_error",
+                message=f"Could not parse this receipt: {exc}",
+                temp_file_path=attachment.temp_file_path,
+                filename=attachment.filename,
+            ),
+            tools_called,
+        )
+    finally:
+        try:
+            await parser.close()
+        except Exception:
+            pass
+
+    if not parse_result.get("success"):
+        return (
+            DocumentWorkflowArtifact(
+                attachment_id=attachment.attachment_id,
+                document_type=attachment.document_type,
+                status="parse_error",
+                message=str(parse_result.get("error", "Failed to parse receipt.")),
+                temp_file_path=attachment.temp_file_path,
+                filename=attachment.filename,
+            ),
+            tools_called,
+        )
+
+    parsed_data = parse_result.get("parsed_data") or {}
+    confidence = _compute_charitable_confidence(parsed_data)
+    raw_output = str(parse_result.get("raw_output", ""))
+
+    donation = CharitableDonationSchema(
+        organization_name=parsed_data.get("organization_name", "Unknown Organization"),
+        donation_date=parsed_data.get("donation_date"),
+        amount=float(parsed_data.get("amount", 0)),
+        tax_deductible=parsed_data.get("tax_deductible", True),
+        description=parsed_data.get("description"),
+        raw_model_output=raw_output,
+    )
+
+    parsed_receipt = ParsedReceipt(
+        category=ExpenseCategory.CHARITABLE,
+        charitable_data=donation,
+        confidence=confidence,
+        parsing_errors=[] if confidence > 0.7 else ["Low confidence in some fields"],
+    )
+
+    message = "Charitable receipt parsed. Review and confirm to finish importing it."
     return (
         DocumentWorkflowArtifact(
             attachment_id=attachment.attachment_id,
             document_type=attachment.document_type,
-            status="unsupported",
-            message=(
-                "Charitable receipt workflows are not implemented yet. "
-                "This upload is ready for future support."
-            ),
+            status="ready_for_confirmation",
+            message=message,
             temp_file_path=attachment.temp_file_path,
             filename=attachment.filename,
+            parsed_data=parsed_receipt.model_dump(mode="json"),
         ),
-        [],
+        tools_called,
     )
 
 

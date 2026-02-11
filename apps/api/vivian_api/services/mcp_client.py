@@ -181,6 +181,43 @@ class MCPClient:
         
         content = result.get("content", [{}])[0].get("text", "{}")
         return json.loads(content)
+
+    async def upload_charitable_receipt_to_drive(
+        self,
+        local_file_path: str,
+        donation_year: Optional[int] = None,
+        filename: Optional[str] = None,
+    ) -> dict:
+        """Upload charitable receipt to Google Drive."""
+        payload = {
+            "local_file_path": local_file_path,
+        }
+        if donation_year:
+            payload["donation_year"] = donation_year
+        if filename:
+            payload["filename"] = filename
+
+        result = await self.call_tool("upload_charitable_receipt_to_drive", payload)
+        content = result.get("content", [{}])[0].get("text", "{}")
+        return json.loads(content)
+
+    async def append_charitable_donation_to_ledger(
+        self,
+        donation_json: dict,
+        drive_file_id: str,
+        force_append: bool = False,
+    ) -> dict:
+        """Append charitable donation to ledger."""
+        payload = {
+            "donation_json": donation_json,
+            "drive_file_id": drive_file_id,
+        }
+        if force_append:
+            payload["force_append"] = True
+
+        result = await self.call_tool("append_charitable_donation_to_ledger", payload)
+        content = result.get("content", [{}])[0].get("text", "{}")
+        return json.loads(content)
     
     async def check_for_duplicates(
         self,

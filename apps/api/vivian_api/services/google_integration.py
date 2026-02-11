@@ -145,8 +145,12 @@ def build_mcp_env(settings: Settings) -> dict[str, str]:
         env["VIVIAN_MCP_NOT_ELIGIBLE_FOLDER_ID"] = settings.mcp_not_eligible_folder_id
     if settings.mcp_sheets_spreadsheet_id:
         env["VIVIAN_MCP_SHEETS_SPREADSHEET_ID"] = settings.mcp_sheets_spreadsheet_id
-    if settings.mcp_sheets_worksheet_name:
-        env["VIVIAN_MCP_SHEETS_WORKSHEET_NAME"] = settings.mcp_sheets_worksheet_name
+    if settings.charitable_drive_folder_id:
+        env["VIVIAN_MCP_CHARITABLE_DRIVE_FOLDER_ID"] = settings.charitable_drive_folder_id
+    if settings.charitable_spreadsheet_id:
+        env["VIVIAN_MCP_CHARITABLE_SPREADSHEET_ID"] = settings.charitable_spreadsheet_id
+    if settings.charitable_worksheet_name:
+        env["VIVIAN_MCP_CHARITABLE_WORKSHEET_NAME"] = settings.charitable_worksheet_name
 
     return env
 

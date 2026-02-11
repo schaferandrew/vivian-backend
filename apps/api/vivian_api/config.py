@@ -138,7 +138,8 @@ class Settings(BaseSettings):
     mcp_server_path: str = "/mcp-server"
     # MCP servers root path for registry-discovered servers.
     mcp_servers_root_path: str = "/mcp-servers"
-    mcp_default_enabled_servers: str = "vivian_hsa"
+    # Default enabled servers - will be filtered by availability at runtime
+    mcp_default_enabled_servers: str = ""
     # JSON array for future custom server definitions.
     mcp_custom_servers_json: str = ""
     user_location: str = ""
@@ -170,17 +171,6 @@ class Settings(BaseSettings):
     google_oauth_error_redirect: str = "http://localhost:3000/settings?google=error"
     # Note: token store path is now deprecated; tokens stored in DB
     google_oauth_token_store_path: str = "/tmp/vivian-uploads/google-oauth.json"
-    
-    # MCP Google Drive/Sheets settings
-    # Note: These are now stored per-home in mcp_server_settings table
-    # These env vars serve as defaults/fallbacks
-    mcp_drive_root_folder_id: str = ""
-    mcp_sheets_spreadsheet_id: str = ""
-    mcp_sheets_worksheet_name: str = "HSA_Ledger"
-    mcp_reimbursed_folder_id: str = ""
-    mcp_unreimbursed_folder_id: str = ""
-    mcp_not_eligible_folder_id: str = ""
-    
     class Config:
         env_file = ".env"
         env_prefix = "VIVIAN_API_"
@@ -195,20 +185,10 @@ class Settings(BaseSettings):
         if "DATABASE_URL" in os.environ and not self.database_url:
             self.database_url = os.environ["DATABASE_URL"]
 
-        # Backward-compatible fallback: accept MCP-prefixed vars directly.
-        fallback_env = {
-            "mcp_drive_root_folder_id": "VIVIAN_MCP_DRIVE_ROOT_FOLDER_ID",
-            "mcp_reimbursed_folder_id": "VIVIAN_MCP_REIMBURSED_FOLDER_ID",
-            "mcp_unreimbursed_folder_id": "VIVIAN_MCP_UNREIMBURSED_FOLDER_ID",
-            "mcp_not_eligible_folder_id": "VIVIAN_MCP_NOT_ELIGIBLE_FOLDER_ID",
-            "mcp_sheets_spreadsheet_id": "VIVIAN_MCP_SHEETS_SPREADSHEET_ID",
-            "mcp_sheets_worksheet_name": "VIVIAN_MCP_SHEETS_WORKSHEET_NAME",
-        }
-        for field_name, env_name in fallback_env.items():
-            if not getattr(self, field_name):
-                value = os.environ.get(env_name, "")
-                if value:
-                    setattr(self, field_name, value)
+        # Note: Per-server settings (MCP tool configurations) are now stored in the database
+        # and managed via the /mcp/servers/{server_id}/settings endpoints.
+        # Legacy environment variables for HSA/Charitable settings should be migrated
+        # to the new per-server settings storage.
 
     def resolve_mcp_server_path(self, folder_name: str) -> str:
         """Resolve MCP server directory by folder name under root path."""

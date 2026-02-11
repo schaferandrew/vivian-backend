@@ -13,6 +13,12 @@ class ReimbursementStatus(str, Enum):
     NOT_HSA_ELIGIBLE = "not_hsa_eligible"
 
 
+class ExpenseCategory(str, Enum):
+    """Receipt category."""
+    HSA = "hsa"
+    CHARITABLE = "charitable"
+
+
 class ExpenseSchema(BaseModel):
     """Structured expense data extracted from receipt."""
     provider: str = Field(description="Medical provider name")
@@ -21,6 +27,25 @@ class ExpenseSchema(BaseModel):
     amount: float = Field(description="Total amount paid")
     hsa_eligible: bool = Field(default=True, description="Whether expense is HSA eligible")
     raw_model_output: Optional[str] = Field(None, description="Raw model output for debugging")
+
+
+class CharitableDonationSchema(BaseModel):
+    """Structured charitable donation data extracted from receipt."""
+    organization_name: str = Field(description="Charity or organization name")
+    donation_date: Optional[date] = Field(None, description="Donation date")
+    amount: float = Field(description="Donation amount")
+    tax_deductible: bool = Field(default=True, description="Whether donation is tax-deductible")
+    description: Optional[str] = Field(None, description="Optional donation description")
+    raw_model_output: Optional[str] = Field(None, description="Raw model output for debugging")
+
+
+class ParsedReceipt(BaseModel):
+    """Result of parsing a receipt."""
+    category: ExpenseCategory = ExpenseCategory.HSA
+    expense: Optional[ExpenseSchema] = None
+    charitable_data: Optional[CharitableDonationSchema] = None
+    confidence: float = Field(ge=0.0, le=1.0, description="Model confidence score")
+    parsing_errors: list[str] = Field(default_factory=list)
 
 
 class LedgerEntry(BaseModel):
@@ -34,6 +59,20 @@ class LedgerEntry(BaseModel):
     status: ReimbursementStatus = ReimbursementStatus.UNREIMBURSED
     reimbursement_date: Optional[date] = None
     drive_file_id: str = Field(description="Google Drive file ID")
+    confidence: float
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class CharitableLedgerEntry(BaseModel):
+    """Single entry in the charitable donation ledger."""
+    id: str = Field(description="Unique entry ID")
+    organization_name: str
+    donation_date: Optional[date] = None
+    amount: float
+    tax_deductible: bool = True
+    description: Optional[str] = None
+    drive_file_id: str = Field(description="Google Drive file ID")
+    tax_year: str = Field(description="Tax year for the donation")
     confidence: float
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -62,42 +101,3 @@ class HumanConfirmation(BaseModel):
     edited_expense: Optional[ExpenseSchema] = Field(None, description="User-edited expense data")
     selected_status: ReimbursementStatus
     notes: Optional[str] = None
-
-
-class ExpenseCategory(str, Enum):
-    """Category of expense/receipt."""
-    HSA = "hsa"
-    CHARITABLE = "charitable"
-
-
-class CharitableDonationSchema(BaseModel):
-    """Structured charitable donation data extracted from receipt."""
-    organization_name: str = Field(description="Name of the charitable organization")
-    donation_date: Optional[date] = Field(None, description="Date donation was made")
-    amount: float = Field(description="Donation amount")
-    tax_deductible: bool = Field(default=True, description="Whether donation is tax deductible")
-    description: Optional[str] = Field(None, description="Description of donation/purpose")
-    raw_model_output: Optional[str] = Field(None, description="Raw model output for debugging")
-
-
-class ParsedReceipt(BaseModel):
-    """Result of parsing a receipt."""
-    category: ExpenseCategory = Field(default=ExpenseCategory.HSA, description="Receipt category")
-    expense: Optional[ExpenseSchema] = Field(None, description="HSA expense data (if category is HSA)")
-    charitable_data: Optional[CharitableDonationSchema] = Field(None, description="Charitable donation data (if category is CHARITABLE)")
-    confidence: float = Field(ge=0.0, le=1.0, description="Model confidence score")
-    parsing_errors: list[str] = Field(default_factory=list)
-
-
-class CharitableLedgerEntry(BaseModel):
-    """Single entry in the charitable donation ledger."""
-    id: str = Field(description="Unique entry ID")
-    organization_name: str
-    donation_date: Optional[date] = None
-    amount: float
-    tax_deductible: bool = True
-    description: Optional[str] = None
-    drive_file_id: str = Field(description="Google Drive file ID")
-    tax_year: str = Field(description="Tax year for the donation")
-    confidence: float
-    created_at: datetime = Field(default_factory=datetime.utcnow)

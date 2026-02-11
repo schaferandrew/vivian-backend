@@ -955,6 +955,147 @@ class HSAToolManager:
                 "success": False,
                 "error": str(e)
             })
+
+    async def read_ledger_entries(
+        self,
+        year: Optional[int] = None,
+        status_filter: Optional[str] = None,
+        limit: int = 1000
+    ) -> str:
+        """Read entries from the HSA ledger with optional filtering.
+        
+        Args:
+            year: Optional year to filter by (e.g., 2025)
+            status_filter: Optional status to filter by ("reimbursed", "unreimbursed", "not_hsa_eligible")
+            limit: Maximum number of entries to return (default 1000)
+            
+        Returns:
+            JSON string with entries, totals, and summary statistics
+        """
+        try:
+            service = self._get_sheets_service()
+            spreadsheet_id = self.settings.sheets_spreadsheet_id
+            sheet_title = self.settings.sheets_worksheet_name or "HSA_Ledger"
+            
+            # Fetch all data
+            result = service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=f"{sheet_title}!A:K"
+            ).execute()
+            
+            rows = result.get("values", [])
+            if len(rows) <= 1:
+                return json.dumps({
+                    "success": True,
+                    "entries": [],
+                    "summary": {
+                        "total_entries": 0,
+                        "total_amount": 0,
+                        "total_reimbursed": 0,
+                        "total_unreimbursed": 0,
+                        "total_not_eligible": 0,
+                    }
+                })
+            
+            headers = rows[0] if rows else []
+            data_rows = rows[1:]
+            
+            # Map column indices (based on EXPECTED_HEADERS)
+            col_map = {
+                "id": 0,
+                "provider": 1,
+                "service_date": 2,
+                "paid_date": 3,
+                "amount": 4,
+                "hsa_eligible": 5,
+                "status": 6,
+                "reimbursement_date": 7,
+                "drive_file_id": 8,
+                "confidence": 9,
+                "created_at": 10,
+            }
+            
+            entries = []
+            total_reimbursed = 0.0
+            total_unreimbursed = 0.0
+            total_not_eligible = 0.0
+            count_reimbursed = 0
+            count_unreimbursed = 0
+            count_not_eligible = 0
+            
+            for row in data_rows:
+                if len(row) < 7:
+                    continue
+                
+                # Extract data
+                entry = {
+                    "id": row[col_map["id"]] if len(row) > col_map["id"] else "",
+                    "provider": row[col_map["provider"]] if len(row) > col_map["provider"] else "",
+                    "service_date": row[col_map["service_date"]] if len(row) > col_map["service_date"] else "",
+                    "paid_date": row[col_map["paid_date"]] if len(row) > col_map["paid_date"] else "",
+                    "amount": 0.0,
+                    "hsa_eligible": row[col_map["hsa_eligible"]] if len(row) > col_map["hsa_eligible"] else "Yes",
+                    "status": row[col_map["status"]] if len(row) > col_map["status"] else "unreimbursed",
+                    "reimbursement_date": row[col_map["reimbursement_date"]] if len(row) > col_map["reimbursement_date"] else "",
+                    "drive_file_id": row[col_map["drive_file_id"]] if len(row) > col_map["drive_file_id"] else "",
+                    "confidence": row[col_map["confidence"]] if len(row) > col_map["confidence"] else "0.9",
+                    "created_at": row[col_map["created_at"]] if len(row) > col_map["created_at"] else "",
+                }
+                
+                # Parse amount
+                try:
+                    entry["amount"] = float(row[col_map["amount"]]) if len(row) > col_map["amount"] else 0.0
+                except (ValueError, TypeError):
+                    entry["amount"] = 0.0
+                
+                # Apply filters
+                if status_filter and entry["status"] != status_filter:
+                    continue
+                
+                # Year filter (check service_date or paid_date)
+                if year:
+                    date_str = entry["service_date"] or entry["paid_date"] or entry["created_at"]
+                    if not date_str or str(year) not in date_str:
+                        continue
+                
+                entries.append(entry)
+                
+                # Track totals
+                if entry["status"] == "reimbursed":
+                    total_reimbursed += entry["amount"]
+                    count_reimbursed += 1
+                elif entry["status"] == "unreimbursed":
+                    total_unreimbursed += entry["amount"]
+                    count_unreimbursed += 1
+                elif entry["status"] == "not_hsa_eligible":
+                    total_not_eligible += entry["amount"]
+                    count_not_eligible += 1
+                
+                # Respect limit
+                if len(entries) >= limit:
+                    break
+            
+            return json.dumps({
+                "success": True,
+                "entries": entries,
+                "summary": {
+                    "total_entries": len(entries),
+                    "total_amount": round(total_reimbursed + total_unreimbursed + total_not_eligible, 2),
+                    "total_reimbursed": round(total_reimbursed, 2),
+                    "total_unreimbursed": round(total_unreimbursed, 2),
+                    "total_not_eligible": round(total_not_eligible, 2),
+                    "count_reimbursed": count_reimbursed,
+                    "count_unreimbursed": count_unreimbursed,
+                    "count_not_eligible": count_not_eligible,
+                    "available_to_reimburse": round(total_unreimbursed, 2),
+                }
+            })
+            
+        except Exception as e:
+            return json.dumps({
+                "success": False,
+                "error": str(e)
+            })
     
     async def bulk_import(
         self, 
