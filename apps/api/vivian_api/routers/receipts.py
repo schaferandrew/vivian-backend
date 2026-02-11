@@ -171,7 +171,7 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
     except (InvalidFilePathError, FileNotFoundError) as exc:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid file path: {exc}"
+            detail="Invalid or inaccessible file. Please ensure the file was uploaded correctly."
         )
     
     # Initialize MCP client

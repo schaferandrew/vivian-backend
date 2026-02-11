@@ -23,7 +23,7 @@ def validate_temp_file_path(file_path: str, temp_upload_dir: str) -> Path:
         
     Raises:
         InvalidFilePathError: If the path is outside the temp upload directory
-        FileNotFoundError: If the file doesn't exist
+        FileNotFoundError: If the file doesn't exist or is not a regular file
     """
     # Convert to Path objects and resolve to absolute paths (following symlinks)
     try:
@@ -42,6 +42,11 @@ def validate_temp_file_path(file_path: str, temp_upload_dir: str) -> Path:
         # Path is valid - within temp directory
         if not resolved_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
+        
+        # Ensure it's a regular file, not a directory
+        if not resolved_path.is_file():
+            raise InvalidFilePathError("Path must be a regular file, not a directory")
+        
         return resolved_path
     
     # Path is outside the allowed directory

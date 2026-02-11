@@ -59,7 +59,7 @@ class OpenRouterService:
         except (InvalidFilePathError, FileNotFoundError) as exc:
             return {
                 "success": False,
-                "error": f"Invalid file path: {exc}",
+                "error": "Invalid or inaccessible file. Please ensure the file was uploaded correctly.",
             }
         
         # Read PDF and encode as base64

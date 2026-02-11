@@ -105,7 +105,7 @@ async def _run_hsa_receipt_workflow(
                 attachment_id=attachment.attachment_id,
                 document_type=attachment.document_type,
                 status="parse_error",
-                message=f"Invalid file path: {exc}",
+                message="Could not access the uploaded file. Please try uploading again.",
                 temp_file_path=attachment.temp_file_path,
                 filename=attachment.filename,
             ),

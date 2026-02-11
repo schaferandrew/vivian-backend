@@ -106,3 +106,15 @@ class TestValidateTempFilePath:
             validate_temp_file_path(str(test_file), temp_dir)
         
         assert "does not exist" in str(exc_info.value).lower()
+
+    def test_directory_path_rejected(self):
+        """Test that a directory path (not a file) is rejected."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subdir = Path(temp_dir) / "subdir"
+            subdir.mkdir()
+            
+            # Try to validate a directory path
+            with pytest.raises(InvalidFilePathError) as exc_info:
+                validate_temp_file_path(str(subdir), temp_dir)
+            
+            assert "must be a regular file" in str(exc_info.value).lower()
