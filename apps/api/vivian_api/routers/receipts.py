@@ -7,9 +7,14 @@ from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Body, Depends
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
-from vivian_api.auth.dependencies import get_current_user_context
+from vivian_api.auth.dependencies import (
+    CurrentUserContext,
+    get_current_user_context,
+)
 from vivian_api.config import Settings
+from vivian_api.db.database import get_db
 from vivian_api.models.schemas import (
     ReceiptUploadResponse,
     ReceiptParseRequest,
@@ -29,6 +34,7 @@ from vivian_api.models.schemas import (
 )
 from vivian_api.services.receipt_parser import OpenRouterService
 from vivian_api.services.mcp_client import MCPClient
+from vivian_api.services.mcp_registry import get_mcp_server_definitions
 from vivian_api.utils import validate_temp_file_path, InvalidFilePathError
 from vivian_shared.models import ParsedReceipt, ExpenseSchema, ReimbursementStatus
 
@@ -40,6 +46,53 @@ router = APIRouter(
     dependencies=[Depends(get_current_user_context)],
 )
 settings = Settings()
+
+
+async def _create_mcp_client(
+    mcp_server_id: str = "vivian_hsa",
+    db: Session | None = None,
+    home_id: str | None = None,
+) -> MCPClient:
+    """Create an MCPClient with database-backed or legacy configuration.
+    
+    Args:
+        mcp_server_id: The MCP server to connect to
+        db: Database session (optional, for DB-backed config)
+        home_id: Home ID (optional, for DB-backed config)
+        
+    Returns:
+        Configured MCPClient instance
+    """
+    definitions = get_mcp_server_definitions(settings)
+    definition = definitions.get(mcp_server_id)
+    
+    if not definition:
+        raise ValueError(f"Unknown MCP server: {mcp_server_id}")
+    
+    # If we have DB session and home_id, use database-backed config
+    if db is not None and home_id is not None:
+        from vivian_api.services.google_integration import build_mcp_env_from_db
+        env = await build_mcp_env_from_db(home_id, mcp_server_id, db, settings)
+        return MCPClient(
+            server_command=definition.command,
+            process_env=env,
+            server_path_override=definition.server_path,
+            mcp_server_id=mcp_server_id,
+        )
+    
+    # Fall back to legacy env-based config
+    return MCPClient(
+        server_command=definition.command,
+        server_path_override=definition.server_path,
+        mcp_server_id=mcp_server_id,
+    )
+
+
+def _get_default_home_id(current_user: CurrentUserContext) -> str:
+    """Get the user's default home ID."""
+    if not current_user.default_membership:
+        raise HTTPException(status_code=400, detail="No home membership found")
+    return str(current_user.default_membership.home_id)
 
 
 def get_temp_dir() -> Path:
@@ -76,7 +129,11 @@ async def upload_receipt(file: UploadFile = File(...)):
 
 
 @router.post("/parse", response_model=ReceiptParseResponse)
-async def parse_receipt(request: ReceiptParseRequest = Body(...)):
+async def parse_receipt(
+    request: ReceiptParseRequest = Body(...),
+    current_user: CurrentUserContext = Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
     """Parse a previously uploaded receipt using OpenRouter.
     
     Returns structured expense data with confidence score.
@@ -119,7 +176,8 @@ async def parse_receipt(request: ReceiptParseRequest = Body(...)):
         duplicate_check_error: str | None = None
         if expense.hsa_eligible:
             try:
-                mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
+                home_id = _get_default_home_id(current_user)
+                mcp_client = await _create_mcp_client("vivian_hsa", db, home_id)
                 await mcp_client.start()
                 dup_result = await _check_duplicates(mcp_client, expense)
                 if dup_result.get("is_duplicate"):
@@ -158,7 +216,11 @@ async def parse_receipt(request: ReceiptParseRequest = Body(...)):
 
 
 @router.post("/confirm", response_model=ConfirmReceiptResponse)
-async def confirm_receipt(request: ConfirmReceiptRequest):
+async def confirm_receipt(
+    request: ConfirmReceiptRequest,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
     """Confirm and save a parsed receipt to Drive and Ledger.
     
     This is the final step after user confirmation/editing.
@@ -180,8 +242,9 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
             detail="Invalid or inaccessible file. Please ensure the file was uploaded correctly."
         )
     
-    # Initialize MCP client
-    mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
+    # Initialize MCP client with database-backed configuration
+    home_id = _get_default_home_id(current_user)
+    mcp_client = await _create_mcp_client("vivian_hsa", db, home_id)
     await mcp_client.start()
     
     try:
@@ -297,7 +360,11 @@ async def _check_duplicates(
 
 
 @router.post("/check-duplicate", response_model=CheckDuplicateResponse)
-async def check_duplicate(request: CheckDuplicateRequest):
+async def check_duplicate(
+    request: CheckDuplicateRequest,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
     """Check edited expense payload for potential duplicates."""
     if not request.expense_data.hsa_eligible:
         return CheckDuplicateResponse(
@@ -306,7 +373,8 @@ async def check_duplicate(request: CheckDuplicateRequest):
             recommendation="import",
         )
 
-    mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
+    home_id = _get_default_home_id(current_user)
+    mcp_client = await _create_mcp_client("vivian_hsa", db, home_id)
     try:
         await mcp_client.start()
         dup_result = await _check_duplicates(
