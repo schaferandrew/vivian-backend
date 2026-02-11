@@ -19,7 +19,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Note: homes.id is String(36), not UUID
+    # Note: homes.id is String(36) in existing schema
     op.create_table(
         "mcp_server_settings",
         sa.Column("id", sa.String(36), primary_key=True, server_default=sa.text("gen_random_uuid()::text")),
