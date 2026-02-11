@@ -26,11 +26,18 @@ from vivian_api.models.schemas import (
     BulkImportSummary,
     BulkImportConfirmRequest,
     BulkImportConfirmResponse,
+    BulkImportConfirmItem,
 )
 from vivian_api.services.receipt_parser import OpenRouterService
 from vivian_api.services.mcp_client import MCPClient
 from vivian_api.utils import validate_temp_file_path, InvalidFilePathError
-from vivian_shared.models import ParsedReceipt, ExpenseSchema, ReimbursementStatus
+from vivian_shared.models import (
+    ParsedReceipt,
+    ExpenseSchema,
+    ReimbursementStatus,
+    ExpenseCategory,
+    CharitableDonationSchema,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -47,6 +54,40 @@ def get_temp_dir() -> Path:
     temp_dir = Path(settings.temp_upload_dir)
     temp_dir.mkdir(parents=True, exist_ok=True)
     return temp_dir
+
+
+def _compute_hsa_confidence(parsed_data: dict) -> float:
+    confidence = 0.9
+    if not parsed_data.get("provider"):
+        confidence -= 0.2
+    if not parsed_data.get("service_date"):
+        confidence -= 0.2
+    if not parsed_data.get("amount") or parsed_data.get("amount") == 0:
+        confidence -= 0.3
+    return max(0, confidence)
+
+
+def _compute_charitable_confidence(parsed_data: dict) -> float:
+    confidence = 0.9
+    if not parsed_data.get("organization_name"):
+        confidence -= 0.3
+    if not parsed_data.get("donation_date"):
+        confidence -= 0.2
+    if not parsed_data.get("amount") or parsed_data.get("amount") == 0:
+        confidence -= 0.3
+    return max(0, confidence)
+
+
+def _infer_category(parsed_data: dict) -> ExpenseCategory:
+    category_value = str(parsed_data.get("category", "")).lower().strip()
+    if category_value == ExpenseCategory.CHARITABLE.value:
+        return ExpenseCategory.CHARITABLE
+
+    charitable_keys = ("organization_name", "donation_date", "tax_deductible")
+    if any(parsed_data.get(key) for key in charitable_keys):
+        return ExpenseCategory.CHARITABLE
+
+    return ExpenseCategory.HSA
 
 
 @router.post("/upload", response_model=ReceiptUploadResponse)
@@ -95,29 +136,36 @@ async def parse_receipt(request: ReceiptParseRequest = Body(...)):
         parsed_data = result["parsed_data"]
         raw_output = result.get("raw_output", "")
         
-        # Calculate confidence based on parsing success
-        confidence = 0.9  # Start high, reduce for missing fields
-        
-        if not parsed_data.get("provider"):
-            confidence -= 0.2
-        if not parsed_data.get("service_date"):
-            confidence -= 0.2
-        if not parsed_data.get("amount") or parsed_data.get("amount") == 0:
-            confidence -= 0.3
-        
-        expense = ExpenseSchema(
-            provider=parsed_data.get("provider", "Unknown Provider"),
-            service_date=parsed_data.get("service_date"),
-            paid_date=parsed_data.get("paid_date"),
-            amount=float(parsed_data.get("amount", 0)),
-            hsa_eligible=parsed_data.get("hsa_eligible", True),
-            raw_model_output=raw_output
-        )
+        category = _infer_category(parsed_data)
+
+        if category == ExpenseCategory.CHARITABLE:
+            confidence = _compute_charitable_confidence(parsed_data)
+            donation = CharitableDonationSchema(
+                organization_name=parsed_data.get("organization_name", "Unknown Organization"),
+                donation_date=parsed_data.get("donation_date"),
+                amount=float(parsed_data.get("amount", 0)),
+                tax_deductible=parsed_data.get("tax_deductible", True),
+                description=parsed_data.get("description"),
+                raw_model_output=raw_output,
+            )
+            expense = None
+        else:
+            confidence = _compute_hsa_confidence(parsed_data)
+            donation = None
+            expense = ExpenseSchema(
+                provider=parsed_data.get("provider", "Unknown Provider"),
+                service_date=parsed_data.get("service_date"),
+                paid_date=parsed_data.get("paid_date"),
+                amount=float(parsed_data.get("amount", 0)),
+                hsa_eligible=parsed_data.get("hsa_eligible", True),
+                raw_model_output=raw_output
+            )
 
         is_duplicate = False
         duplicate_info: list[DuplicateInfo] | None = None
         duplicate_check_error: str | None = None
-        if expense.hsa_eligible:
+        mcp_client = None
+        if expense and expense.hsa_eligible:
             try:
                 mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
                 await mcp_client.start()
@@ -130,11 +178,13 @@ async def parse_receipt(request: ReceiptParseRequest = Body(...)):
             except Exception as dup_error:
                 duplicate_check_error = f"Duplicate check unavailable: {dup_error}"
             finally:
-                if "mcp_client" in locals():
+                if mcp_client:
                     await mcp_client.stop()
         
         parsed_receipt = ParsedReceipt(
+            category=category,
             expense=expense,
+            charitable_data=donation,
             confidence=max(0, confidence),
             parsing_errors=[] if confidence > 0.7 else ["Low confidence in some fields"]
         )
@@ -180,30 +230,64 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
             detail="Invalid or inaccessible file. Please ensure the file was uploaded correctly."
         )
     
+    category = request.category or ExpenseCategory.HSA
+    status = request.status if category == ExpenseCategory.HSA else None
+    if category == ExpenseCategory.CHARITABLE:
+        charitable_data = request.charitable_data
+        if not charitable_data:
+            raise HTTPException(status_code=422, detail="charitable_data is required for charitable receipts")
+    else:
+        expense_data = request.expense_data
+        if not expense_data:
+            raise HTTPException(status_code=422, detail="expense_data is required for HSA receipts")
+        if not status:
+            raise HTTPException(status_code=422, detail="status is required for HSA receipts")
+
     # Initialize MCP client
     mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
     await mcp_client.start()
     
     try:
         # Check for duplicates first (if not forcing)
-        if not request.force:
-            expense_dict = request.expense_data.model_dump()
-            dup_result = await mcp_client.check_for_duplicates(expense_dict)
-            
-            if dup_result.get("is_duplicate"):
-                return ConfirmReceiptResponse(
-                    success=False,
-                    message=f"Duplicate detected: {dup_result.get('recommendation', 'review')}",
-                    is_duplicate=True,
-                    duplicate_info=[DuplicateInfo(**d) for d in dup_result.get("potential_duplicates", [])]
-                )
-        
-        # Upload to Google Drive
-        upload_result = await mcp_client.upload_receipt_to_drive(
-            request.temp_file_path,
-            request.status.value,
-            filename=None
-        )
+        if category == ExpenseCategory.HSA:
+            expense_data = request.expense_data
+            if expense_data is None:
+                raise HTTPException(status_code=422, detail="expense_data is required for HSA receipts")
+            if status is None:
+                raise HTTPException(status_code=422, detail="status is required for HSA receipts")
+            status_value = status.value
+            if not request.force:
+                expense_dict = expense_data.model_dump()
+                dup_result = await mcp_client.check_for_duplicates(expense_dict)
+
+                if dup_result.get("is_duplicate"):
+                    return ConfirmReceiptResponse(
+                        success=False,
+                        message=f"Duplicate detected: {dup_result.get('recommendation', 'review')}",
+                        is_duplicate=True,
+                        duplicate_info=[DuplicateInfo(**d) for d in dup_result.get("potential_duplicates", [])]
+                    )
+
+            # Upload to Google Drive
+            upload_result = await mcp_client.upload_receipt_to_drive(
+                request.temp_file_path,
+                status_value,
+                filename=None
+            )
+        else:
+            charitable_data = request.charitable_data
+            if charitable_data is None:
+                raise HTTPException(status_code=422, detail="charitable_data is required for charitable receipts")
+            donation_year = (
+                charitable_data.donation_date.year
+                if charitable_data.donation_date
+                else None
+            )
+            upload_result = await mcp_client.upload_charitable_receipt_to_drive(
+                request.temp_file_path,
+                donation_year=donation_year,
+                filename=None,
+            )
         
         if not upload_result.get("success"):
             raise HTTPException(
@@ -214,33 +298,48 @@ async def confirm_receipt(request: ConfirmReceiptRequest):
         drive_file_id = upload_result["file_id"]
         
         # Add to ledger
-        expense_dict = request.expense_data.model_dump()
-        expense_dict["reimbursement_date"] = (
-            request.reimbursement_date.isoformat() if request.reimbursement_date else None
-        )
-        
-        ledger_result = await mcp_client.append_to_ledger(
-            expense_dict,
-            request.status.value,
-            drive_file_id
-        )
+        if category == ExpenseCategory.HSA:
+            expense_data = request.expense_data
+            if expense_data is None:
+                raise HTTPException(status_code=422, detail="expense_data is required for HSA receipts")
+            expense_dict = expense_data.model_dump()
+            expense_dict["reimbursement_date"] = (
+                request.reimbursement_date.isoformat() if request.reimbursement_date else None
+            )
+
+            ledger_result = await mcp_client.append_to_ledger(
+                expense_dict,
+                status_value,
+                drive_file_id
+            )
+        else:
+            charitable_data = request.charitable_data
+            if charitable_data is None:
+                raise HTTPException(status_code=422, detail="charitable_data is required for charitable receipts")
+            donation_json = charitable_data.model_dump(mode="json")
+            ledger_result = await mcp_client.append_charitable_donation_to_ledger(
+                donation_json,
+                drive_file_id,
+                force_append=request.force,
+            )
         
         if not ledger_result.get("success"):
             duplicate_check = ledger_result.get("duplicate_check") or {}
             duplicate_error = str(ledger_result.get("error") or "").lower()
 
-            # If append step reports duplicate, surface it as a duplicate response
-            # so the client can show skip/override instead of a generic failure.
-            if not request.force and (
-                duplicate_check.get("is_duplicate") or "duplicate" in duplicate_error
-            ):
-                potential_duplicates = duplicate_check.get("potential_duplicates", [])
-                return ConfirmReceiptResponse(
-                    success=False,
-                    message=f"Duplicate detected: {duplicate_check.get('recommendation', 'review')}",
-                    is_duplicate=True,
-                    duplicate_info=[DuplicateInfo(**d) for d in potential_duplicates],
-                )
+            if category == ExpenseCategory.HSA:
+                # If append step reports duplicate, surface it as a duplicate response
+                # so the client can show skip/override instead of a generic failure.
+                if not request.force and (
+                    duplicate_check.get("is_duplicate") or "duplicate" in duplicate_error
+                ):
+                    potential_duplicates = duplicate_check.get("potential_duplicates", [])
+                    return ConfirmReceiptResponse(
+                        success=False,
+                        message=f"Duplicate detected: {duplicate_check.get('recommendation', 'review')}",
+                        is_duplicate=True,
+                        duplicate_info=[DuplicateInfo(**d) for d in potential_duplicates],
+                    )
 
             raise HTTPException(
                 status_code=500,
@@ -403,6 +502,7 @@ async def _scan_file_paths(
                         temp_file_path=str(receipt_path),
                         status="failed",
                         error=parse_result.get("error", "Unknown parsing error"),
+                        category=ExpenseCategory.HSA,
                     ))
                     summary.failed_count += 1
                     continue
@@ -450,6 +550,7 @@ async def _scan_file_paths(
                         status="skipped",
                         expense=expense,
                         confidence=confidence,
+                        category=ExpenseCategory.HSA,
                         warnings=["Not HSA eligible"],
                     ))
                     summary.failed_count += 1
@@ -462,6 +563,7 @@ async def _scan_file_paths(
                         status=status,
                         expense=expense,
                         confidence=confidence,
+                        category=ExpenseCategory.HSA,
                         duplicate_info=[DuplicateInfo(**d) for d in (duplicate_info or [])],
                     ))
                     summary.duplicate_count += 1
@@ -473,6 +575,7 @@ async def _scan_file_paths(
                         status="flagged",
                         expense=expense,
                         confidence=confidence,
+                        category=ExpenseCategory.HSA,
                         warnings=warnings,
                     ))
                     summary.flagged_count += 1
@@ -485,6 +588,7 @@ async def _scan_file_paths(
                         status="new",
                         expense=expense,
                         confidence=confidence,
+                        category=ExpenseCategory.HSA,
                     ))
                     summary.new_count += 1
                     summary.total_amount += expense.amount
@@ -495,6 +599,7 @@ async def _scan_file_paths(
                     temp_file_path=str(receipt_path),
                     status="failed",
                     error=str(e),
+                    category=ExpenseCategory.HSA,
                 ))
                 summary.failed_count += 1
                 if not skip_errors:
@@ -537,9 +642,9 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
                     continue
                 parsed = parse_result["parsed_data"]
                 selected_items.append(
-                    {
-                        "temp_file_path": temp_file_path,
-                        "expense_data": ExpenseSchema(
+                    BulkImportConfirmItem(
+                        temp_file_path=temp_file_path,
+                        expense_data=ExpenseSchema(
                             provider=parsed.get("provider", "Unknown"),
                             service_date=parsed.get("service_date"),
                             paid_date=parsed.get("paid_date"),
@@ -547,7 +652,7 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
                             hsa_eligible=parsed.get("hsa_eligible", True),
                             raw_model_output=parse_result.get("raw_output"),
                         ),
-                    }
+                    )
                 )
 
         if not selected_items:
@@ -573,6 +678,15 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
 
             if isinstance(item_status, str):
                 item_status = ReimbursementStatus(item_status)
+
+            if not expense:
+                local_results.append(BulkImportFileResult(
+                    filename=Path(temp_file_path).name,
+                    temp_file_path=temp_file_path,
+                    status="failed",
+                    error="Missing expense data",
+                ))
+                continue
 
             path_to_expense[temp_file_path] = expense
             if not expense.hsa_eligible:
