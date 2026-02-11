@@ -1,7 +1,7 @@
 """LLM service for OpenRouter and Ollama integration."""
 
 import httpx
-from vivian_api.config import Settings, get_selected_model, AVAILABLE_MODELS
+from vivian_api.config import Settings, get_selected_model, AVAILABLE_MODELS, get_ollama_base_url
 
 
 def _is_ollama_model(model_id: str) -> bool:
@@ -122,7 +122,7 @@ async def _get_openrouter_completion(messages: list[dict], model: str, web_searc
 
 async def _get_ollama_completion(messages: list[dict], model: str) -> str:
     """Get chat completion from Ollama local API."""
-    ollama_url = Settings.get_ollama_base_url()
+    ollama_url = get_ollama_base_url()
     # Strip "ollama/" prefix if present
     ollama_model = model.replace("ollama/", "")
     
