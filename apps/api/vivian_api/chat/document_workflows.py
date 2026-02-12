@@ -291,9 +291,12 @@ async def _run_receipt_workflow(
             try:
                 await mcp_client.start()
                 dup_result = await mcp_client.check_charitable_duplicates(donation.model_dump())
+                # Normalize charitable duplicates to match expected field names
+                from vivian_api.routers.receipts import _normalize_charitable_duplicate
+                raw_dups = dup_result.get("potential_duplicates") or []
                 duplicate_info = [
-                    dict(item)
-                    for item in (dup_result.get("potential_duplicates") or [])
+                    _normalize_charitable_duplicate(item)
+                    for item in raw_dups
                     if isinstance(item, dict)
                 ]
                 is_duplicate = bool(dup_result.get("is_duplicate"))

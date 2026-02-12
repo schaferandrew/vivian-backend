@@ -192,6 +192,8 @@ class MCPClient:
         payload = {
             "local_file_path": local_file_path,
         }
+        if donation_year is not None:
+            payload["tax_year"] = str(donation_year)
         if filename:
             payload["filename"] = filename
 
@@ -318,13 +320,13 @@ class MCPClient:
         if self._session:
             try:
                 await self._session.__aexit__(None, None, None)
-            except Exception:
+            except BaseException:
                 pass
             self._session = None
         if self._stdio_cm:
             try:
                 await self._stdio_cm.__aexit__(None, None, None)
-            except Exception:
+            except BaseException:
                 pass
             self._stdio_cm = None
         self._session_started = False

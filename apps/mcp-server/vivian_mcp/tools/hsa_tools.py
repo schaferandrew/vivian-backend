@@ -463,7 +463,7 @@ class HSAToolManager:
         return {
             "entry_id": row[0] if len(row) > 0 else "",
             "provider": row[1] if len(row) > 1 else "",
-            "service_date": row[2] if len(row) > 2 else "",
+            "date": row[2] if len(row) > 2 else "",
             "paid_date": row[3] if len(row) > 3 else "",
             "amount": float(row[4]) if len(row) > 4 and row[4] not in ("", None) else 0,
             "hsa_eligible": (
@@ -576,7 +576,7 @@ class HSAToolManager:
                     duplicate_info = {
                         "entry_id": row[0] if len(row) > 0 else "",
                         "provider": row[1] if len(row) > 1 else "",
-                        "service_date": row[2] if len(row) > 2 else "",
+                        "date": row[2] if len(row) > 2 else "",
                         "paid_date": row[3] if len(row) > 3 else "",
                         "amount": float(row[4]) if len(row) > 4 and row[4] else 0,
                         "hsa_eligible": row[5].lower() == "true" if len(row) > 5 and row[5] else True,

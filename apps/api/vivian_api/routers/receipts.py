@@ -38,6 +38,7 @@ from vivian_api.services.receipt_parser import OpenRouterService
 from vivian_api.services.mcp_client import MCPClient
 from vivian_api.services.mcp_registry import get_mcp_server_definitions
 from vivian_api.utils import validate_temp_file_path, InvalidFilePathError
+from vivian_api.chat.document_workflows import _infer_category
 from vivian_shared.models import (
     ParsedReceipt,
     ExpenseSchema,
@@ -365,11 +366,14 @@ async def confirm_receipt(
                 dup_result = await mcp_client.check_charitable_duplicates(donation_dict)
 
                 if dup_result.get("is_duplicate"):
+                    # Normalize charitable duplicates before constructing DuplicateInfo
+                    raw_dups = dup_result.get("potential_duplicates", [])
+                    normalized_dups = [_normalize_charitable_duplicate(d) for d in raw_dups]
                     return ConfirmReceiptResponse(
                         success=False,
                         message=f"Duplicate detected: {dup_result.get('recommendation', 'review')}",
                         is_duplicate=True,
-                        duplicate_info=[DuplicateInfo(**d) for d in dup_result.get("potential_duplicates", [])]
+                        duplicate_info=[DuplicateInfo(**d) for d in normalized_dups]
                     )
 
             donation_year = (
@@ -479,6 +483,7 @@ async def _check_duplicates(
         result = await mcp_client.check_for_duplicates(expense_dict, fuzzy_days=fuzzy_days)
         return result
     except Exception as e:
+        logger.warning("HSA duplicate check failed: %s", e, exc_info=True)
         # If duplicate check fails, return empty result (allow import)
         return {
             "is_duplicate": False,
@@ -486,6 +491,24 @@ async def _check_duplicates(
             "recommendation": "import",
             "check_error": str(e),
         }
+
+
+def _normalize_charitable_duplicate(raw: dict) -> dict:
+    """Map charitable MCP duplicate fields to DuplicateInfo-compatible dict.
+
+    The charitable MCP tool returns ``organization`` and ``date`` whereas
+    ``DuplicateInfo`` uses ``provider`` (generic name/org) and ``date``.
+    """
+    return {
+        "entry_id": raw.get("entry_id", ""),
+        "provider": raw.get("organization", raw.get("provider", "")),
+        "date": raw.get("date", raw.get("donation_date", raw.get("service_date"))),
+        "amount": float(raw.get("amount", 0)),
+        "status": raw.get("status", ""),
+        "match_type": raw.get("match_type", "exact"),
+        "days_difference": raw.get("days_difference"),
+        "message": raw.get("message"),
+    }
 
 
 async def _check_charitable_duplicates(
@@ -497,8 +520,14 @@ async def _check_charitable_duplicates(
     try:
         donation_dict = donation.model_dump()
         result = await mcp_client.check_charitable_duplicates(donation_dict, fuzzy_days=fuzzy_days)
+        # Normalize potential_duplicates so they match DuplicateInfo schema
+        raw_dups = result.get("potential_duplicates", [])
+        result["potential_duplicates"] = [
+            _normalize_charitable_duplicate(d) for d in raw_dups
+        ]
         return result
     except Exception as e:
+        logger.warning("Charitable duplicate check failed: %s", e, exc_info=True)
         # If duplicate check fails, return empty result (allow import)
         return {
             "is_duplicate": False,
@@ -582,7 +611,11 @@ async def check_charitable_duplicate(
 
 
 @router.post("/bulk-import/scan", response_model=BulkImportResponse)
-async def bulk_import_scan(request: BulkImportRequest):
+async def bulk_import_scan(
+    request: BulkImportRequest,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
     """Scan receipts for parsing and duplicate detection without saving.
     
     This is a preview mode that parses receipts and checks for duplicates
@@ -601,15 +634,22 @@ async def bulk_import_scan(request: BulkImportRequest):
             summary=BulkImportSummary()
         )
     
+    home_id = _get_default_home_id(current_user)
     return await _scan_file_paths(
         [str(p) for p in receipt_files],
         skip_errors=request.skip_errors,
         check_duplicates=request.check_duplicates,
+        db=db,
+        home_id=home_id,
     )
 
 
 @router.post("/bulk-import/scan-temp", response_model=BulkImportResponse)
-async def bulk_import_scan_temp(request: BulkImportTempScanRequest):
+async def bulk_import_scan_temp(
+    request: BulkImportTempScanRequest,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
     """Scan uploaded temp files for parsing and duplicate detection."""
     if not request.temp_file_paths:
         return BulkImportResponse(
@@ -618,10 +658,13 @@ async def bulk_import_scan_temp(request: BulkImportTempScanRequest):
             summary=BulkImportSummary(),
         )
 
+    home_id = _get_default_home_id(current_user)
     return await _scan_file_paths(
         request.temp_file_paths,
         skip_errors=request.skip_errors,
         check_duplicates=request.check_duplicates,
+        db=db,
+        home_id=home_id,
     )
 
 
@@ -630,10 +673,27 @@ async def _scan_file_paths(
     *,
     skip_errors: bool,
     check_duplicates: bool,
+    db: Session,
+    home_id: str,
 ) -> BulkImportResponse:
     parser = OpenRouterService()
-    mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
-    await mcp_client.start()
+    # Lazily created MCP clients - only started when needed for duplicate checks
+    hsa_mcp_client: MCPClient | None = None
+    charitable_mcp_client: MCPClient | None = None
+
+    async def get_hsa_client() -> MCPClient:
+        nonlocal hsa_mcp_client
+        if hsa_mcp_client is None:
+            hsa_mcp_client = await _create_mcp_client("hsa_ledger", db, home_id)
+            await hsa_mcp_client.start()
+        return hsa_mcp_client
+
+    async def get_charitable_client() -> MCPClient:
+        nonlocal charitable_mcp_client
+        if charitable_mcp_client is None:
+            charitable_mcp_client = await _create_mcp_client("charitable_ledger", db, home_id)
+            await charitable_mcp_client.start()
+        return charitable_mcp_client
 
     new_results: list[BulkImportFileResult] = []
     duplicate_results: list[BulkImportFileResult] = []
@@ -653,55 +713,100 @@ async def _scan_file_paths(
                         temp_file_path=str(receipt_path),
                         status="failed",
                         error=parse_result.get("error", "Unknown parsing error"),
-                        category=ExpenseCategory.HSA,
                     ))
                     summary.failed_count += 1
                     continue
 
                 parsed = parse_result["parsed_data"]
-                confidence = 0.9
+
+                # Infer category from parsed data (HSA or charitable)
+                inferred_category = _infer_category(parsed)
+
+                # Build schemas and compute confidence based on category
                 warnings: list[str] = []
+                expense: ExpenseSchema | None = None
+                charitable_data: CharitableDonationSchema | None = None
 
-                if not parsed.get("provider"):
-                    confidence -= 0.2
-                    warnings.append("Missing provider")
-                if not parsed.get("service_date"):
-                    confidence -= 0.2
-                    warnings.append("Missing service date")
-                if not parsed.get("amount") or parsed.get("amount") == 0:
-                    confidence -= 0.3
-                    warnings.append("Missing or zero amount")
+                if inferred_category == ExpenseCategory.CHARITABLE:
+                    confidence = 0.9
+                    if not parsed.get("organization_name"):
+                        confidence -= 0.3
+                        warnings.append("Missing organization name")
+                    if not parsed.get("donation_date"):
+                        confidence -= 0.2
+                        warnings.append("Missing donation date")
+                    if not parsed.get("amount") or parsed.get("amount") == 0:
+                        confidence -= 0.3
+                        warnings.append("Missing or zero amount")
+                    confidence = max(0, confidence)
 
-                confidence = max(0, confidence)
+                    charitable_data = CharitableDonationSchema(
+                        organization_name=parsed.get("organization_name")
+                            or parsed.get("provider")
+                            or "Unknown Organization",
+                        donation_date=parsed.get("donation_date") or parsed.get("service_date"),
+                        amount=float(parsed.get("amount", 0)),
+                        tax_deductible=parsed.get("tax_deductible") if parsed.get("tax_deductible") is not None else True,
+                        description=parsed.get("description"),
+                        raw_model_output=parse_result.get("raw_output"),
+                    )
+                else:
+                    confidence = 0.9
+                    if not parsed.get("provider"):
+                        confidence -= 0.2
+                        warnings.append("Missing provider")
+                    if not parsed.get("service_date"):
+                        confidence -= 0.2
+                        warnings.append("Missing service date")
+                    if not parsed.get("amount") or parsed.get("amount") == 0:
+                        confidence -= 0.3
+                        warnings.append("Missing or zero amount")
+                    confidence = max(0, confidence)
+
+                    hsa_eligible_value = parsed.get("hsa_eligible")
+                    if not isinstance(hsa_eligible_value, bool):
+                        hsa_eligible_value = True
+
+                    expense = ExpenseSchema(
+                        provider=parsed.get("provider", "Unknown Provider"),
+                        service_date=parsed.get("service_date"),
+                        paid_date=parsed.get("paid_date"),
+                        amount=float(parsed.get("amount", 0)),
+                        hsa_eligible=hsa_eligible_value,
+                        raw_model_output=parse_result.get("raw_output"),
+                    )
+
                 needs_review = confidence < settings.confidence_threshold
+                amount = float(parsed.get("amount", 0))
 
-                expense = ExpenseSchema(
-                    provider=parsed.get("provider", "Unknown Provider"),
-                    service_date=parsed.get("service_date"),
-                    paid_date=parsed.get("paid_date"),
-                    amount=float(parsed.get("amount", 0)),
-                    hsa_eligible=parsed.get("hsa_eligible") if parsed.get("hsa_eligible") is not None else True,
-                    raw_model_output=parse_result.get("raw_output"),
-                )
-
+                # Run category-appropriate duplicate check
                 duplicate_info = None
                 is_duplicate = False
-                if check_duplicates and expense.hsa_eligible:
-                    dup_result = await _check_duplicates(mcp_client, expense)
-                    if dup_result.get("check_error"):
-                        warnings.append("Duplicate check unavailable")
-                    if dup_result.get("is_duplicate"):
-                        is_duplicate = True
-                        duplicate_info = dup_result.get("potential_duplicates", [])
+                if check_duplicates:
+                    if inferred_category == ExpenseCategory.HSA and expense and expense.hsa_eligible:
+                        dup_result = await _check_duplicates(await get_hsa_client(), expense)
+                        if dup_result.get("check_error"):
+                            warnings.append("Duplicate check unavailable")
+                        if dup_result.get("is_duplicate"):
+                            is_duplicate = True
+                            duplicate_info = dup_result.get("potential_duplicates", [])
+                    elif inferred_category == ExpenseCategory.CHARITABLE and charitable_data:
+                        dup_result = await _check_charitable_duplicates(await get_charitable_client(), charitable_data)
+                        if dup_result.get("check_error"):
+                            warnings.append("Duplicate check unavailable")
+                        if dup_result.get("is_duplicate"):
+                            is_duplicate = True
+                            duplicate_info = dup_result.get("potential_duplicates", [])
 
-                if not expense.hsa_eligible:
+                # For HSA, skip non-eligible items
+                if inferred_category == ExpenseCategory.HSA and expense and not expense.hsa_eligible:
                     failed_results.append(BulkImportFileResult(
                         filename=receipt_path.name,
                         temp_file_path=str(receipt_path),
                         status="skipped",
                         expense=expense,
                         confidence=confidence,
-                        category=ExpenseCategory.HSA,
+                        category=inferred_category,
                         warnings=["Not HSA eligible"],
                     ))
                     summary.failed_count += 1
@@ -713,24 +818,26 @@ async def _scan_file_paths(
                         temp_file_path=str(receipt_path),
                         status=status,
                         expense=expense,
+                        charitable_data=charitable_data,
                         confidence=confidence,
-                        category=ExpenseCategory.HSA,
+                        category=inferred_category,
                         duplicate_info=[DuplicateInfo(**d) for d in (duplicate_info or [])],
                     ))
                     summary.duplicate_count += 1
-                    summary.total_amount += expense.amount
+                    summary.total_amount += amount
                 elif needs_review:
                     flagged_results.append(BulkImportFileResult(
                         filename=receipt_path.name,
                         temp_file_path=str(receipt_path),
                         status="flagged",
                         expense=expense,
+                        charitable_data=charitable_data,
                         confidence=confidence,
-                        category=ExpenseCategory.HSA,
+                        category=inferred_category,
                         warnings=warnings,
                     ))
                     summary.flagged_count += 1
-                    summary.total_amount += expense.amount
+                    summary.total_amount += amount
                     summary.ready_to_import += 1
                 else:
                     new_results.append(BulkImportFileResult(
@@ -738,11 +845,12 @@ async def _scan_file_paths(
                         temp_file_path=str(receipt_path),
                         status="new",
                         expense=expense,
+                        charitable_data=charitable_data,
                         confidence=confidence,
-                        category=ExpenseCategory.HSA,
+                        category=inferred_category,
                     ))
                     summary.new_count += 1
-                    summary.total_amount += expense.amount
+                    summary.total_amount += amount
                     summary.ready_to_import += 1
             except Exception as e:
                 failed_results.append(BulkImportFileResult(
@@ -750,14 +858,16 @@ async def _scan_file_paths(
                     temp_file_path=str(receipt_path),
                     status="failed",
                     error=str(e),
-                    category=ExpenseCategory.HSA,
                 ))
                 summary.failed_count += 1
                 if not skip_errors:
                     break
     finally:
         await parser.close()
-        await mcp_client.stop()
+        if hsa_mcp_client is not None:
+            await hsa_mcp_client.stop()
+        if charitable_mcp_client is not None:
+            await charitable_mcp_client.stop()
 
     return BulkImportResponse(
         total_files=len(file_paths),
@@ -771,14 +881,34 @@ async def _scan_file_paths(
 
 
 @router.post("/bulk-import/confirm", response_model=BulkImportConfirmResponse)
-async def bulk_import_confirm(request: BulkImportConfirmRequest):
+async def bulk_import_confirm(
+    request: BulkImportConfirmRequest,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
     """Confirm and import selected receipts after review.
     
     Imports selected receipts to Drive and ledger with duplicate checks.
     Uses MCP bulk tool for per-file upload + batched ledger write.
     """
-    mcp_client = MCPClient(["python", "-m", "vivian_mcp.server"])
-    await mcp_client.start()
+    home_id = _get_default_home_id(current_user)
+    # Lazily created MCP clients - only started when needed
+    hsa_mcp_client: MCPClient | None = None
+    charitable_mcp_client: MCPClient | None = None
+
+    async def get_hsa_client() -> MCPClient:
+        nonlocal hsa_mcp_client
+        if hsa_mcp_client is None:
+            hsa_mcp_client = await _create_mcp_client("hsa_ledger", db, home_id)
+            await hsa_mcp_client.start()
+        return hsa_mcp_client
+
+    async def get_charitable_client() -> MCPClient:
+        nonlocal charitable_mcp_client
+        if charitable_mcp_client is None:
+            charitable_mcp_client = await _create_mcp_client("charitable_ledger", db, home_id)
+            await charitable_mcp_client.start()
+        return charitable_mcp_client
 
     legacy_parser = None
     try:
@@ -817,12 +947,21 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
             )
 
         path_to_expense: dict[str, ExpenseSchema] = {}
+        path_to_charitable: dict[str, CharitableDonationSchema] = {}
         local_results: list[BulkImportFileResult] = []
-        mcp_payload: list[dict] = []
+        mcp_payload: list[dict] = []  # HSA items for bulk MCP tool
+        charitable_items: list[dict] = []  # Charitable items for individual processing
 
         for item in selected_items:
             temp_file_path = item["temp_file_path"] if isinstance(item, dict) else item.temp_file_path
+            item_category = (
+                item.get("category") if isinstance(item, dict) else item.category
+            ) or ExpenseCategory.HSA
+            if isinstance(item_category, str):
+                item_category = ExpenseCategory(item_category)
+
             expense = item["expense_data"] if isinstance(item, dict) else item.expense_data
+            charitable_data = item.get("charitable_data") if isinstance(item, dict) else item.charitable_data
             item_status = (
                 item.get("status") if isinstance(item, dict) else item.status
             ) or request.status_override or ReimbursementStatus.UNREIMBURSED
@@ -830,6 +969,28 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
             if isinstance(item_status, str):
                 item_status = ReimbursementStatus(item_status)
 
+            # Charitable items go through a separate path
+            if item_category == ExpenseCategory.CHARITABLE:
+                if not charitable_data:
+                    local_results.append(BulkImportFileResult(
+                        filename=Path(temp_file_path).name,
+                        temp_file_path=temp_file_path,
+                        status="failed",
+                        category=ExpenseCategory.CHARITABLE,
+                        error="Missing charitable donation data",
+                    ))
+                    continue
+                if isinstance(charitable_data, dict):
+                    charitable_data = CharitableDonationSchema(**charitable_data)
+                path_to_charitable[temp_file_path] = charitable_data
+                charitable_items.append({
+                    "local_file_path": temp_file_path,
+                    "charitable_data": charitable_data,
+                    "filename": Path(temp_file_path).name,
+                })
+                continue
+
+            # HSA items
             if not expense:
                 local_results.append(BulkImportFileResult(
                     filename=Path(temp_file_path).name,
@@ -839,6 +1000,8 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
                 ))
                 continue
 
+            if isinstance(expense, dict):
+                expense = ExpenseSchema(**expense)
             path_to_expense[temp_file_path] = expense
             if not expense.hsa_eligible:
                 local_results.append(BulkImportFileResult(
@@ -846,6 +1009,7 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
                     temp_file_path=temp_file_path,
                     status="skipped",
                     expense=expense,
+                    category=ExpenseCategory.HSA,
                     warnings=["Not HSA eligible"],
                 ))
                 continue
@@ -861,7 +1025,7 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
 
         if mcp_payload:
             try:
-                mcp_result = await mcp_client.bulk_import_receipts(
+                mcp_result = await (await get_hsa_client()).bulk_import_receipts(
                     mcp_payload,
                     check_duplicates=True,
                     force_append=request.force,
@@ -874,7 +1038,7 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
                     expense_json = payload.get("expense_json", {})
                     filename = payload.get("filename") or Path(temp_file_path).name
                     try:
-                        upload_result = await mcp_client.upload_receipt_to_drive(
+                        upload_result = await (await get_hsa_client()).upload_receipt_to_drive(
                             temp_file_path,
                             payload.get("reimbursement_status", ReimbursementStatus.UNREIMBURSED.value),
                             filename=filename,
@@ -891,7 +1055,7 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
                             )
                             continue
 
-                        ledger_result = await mcp_client.append_to_ledger(
+                        ledger_result = await (await get_hsa_client()).append_to_ledger(
                             expense_json,
                             payload.get("reimbursement_status", ReimbursementStatus.UNREIMBURSED.value),
                             upload_result["file_id"],
@@ -1011,9 +1175,90 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
                     # If path validation fails, skip cleanup but don't fail the import
                     pass
 
+        # Process charitable items individually (no bulk MCP tool for charitable)
+        for charitable_item in charitable_items:
+            c_temp_file_path = charitable_item["local_file_path"]
+            c_data = charitable_item["charitable_data"]
+            c_filename = charitable_item["filename"]
+            try:
+                upload_result = await (await get_charitable_client()).upload_charitable_receipt_to_drive(
+                    c_temp_file_path,
+                    filename=c_filename,
+                )
+                if not upload_result.get("success"):
+                    local_results.append(BulkImportFileResult(
+                        filename=c_filename,
+                        temp_file_path=c_temp_file_path,
+                        status="failed",
+                        charitable_data=c_data,
+                        category=ExpenseCategory.CHARITABLE,
+                        error=f"Drive upload failed: {upload_result.get('error')}",
+                    ))
+                    continue
+
+                ledger_result = await (await get_charitable_client()).append_charitable_donation_to_ledger(
+                    c_data.model_dump(mode="json"),
+                    upload_result["file_id"],
+                    force_append=request.force,
+                )
+                if not ledger_result.get("success"):
+                    dup_check = ledger_result.get("duplicate_check") or {}
+                    if dup_check.get("is_duplicate"):
+                        raw_dup_info = dup_check.get("potential_duplicates", [])
+                        # Normalize charitable duplicates before constructing DuplicateInfo
+                        normalized_dup_info = [_normalize_charitable_duplicate(d) for d in raw_dup_info]
+                        has_exact = any(d.get("match_type") == "exact" for d in normalized_dup_info)
+                        local_results.append(BulkImportFileResult(
+                            filename=c_filename,
+                            temp_file_path=c_temp_file_path,
+                            status="duplicate_exact" if has_exact else "duplicate_fuzzy",
+                            charitable_data=c_data,
+                            category=ExpenseCategory.CHARITABLE,
+                            duplicate_info=[DuplicateInfo(**d) for d in normalized_dup_info],
+                            error="Duplicate entry detected",
+                        ))
+                        continue
+                    local_results.append(BulkImportFileResult(
+                        filename=c_filename,
+                        temp_file_path=c_temp_file_path,
+                        status="failed",
+                        charitable_data=c_data,
+                        category=ExpenseCategory.CHARITABLE,
+                        error=f"Ledger update failed: {ledger_result.get('error')}",
+                    ))
+                    continue
+
+                local_results.append(BulkImportFileResult(
+                    filename=c_filename,
+                    temp_file_path=c_temp_file_path,
+                    status="new",
+                    charitable_data=c_data,
+                    category=ExpenseCategory.CHARITABLE,
+                ))
+
+                # Clean up imported temp files
+                try:
+                    validated_path = validate_temp_file_path(c_temp_file_path, settings.temp_upload_dir)
+                    if validated_path.exists():
+                        validated_path.unlink()
+                except (InvalidFilePathError, FileNotFoundError):
+                    pass
+            except Exception as charitable_error:
+                local_results.append(BulkImportFileResult(
+                    filename=c_filename,
+                    temp_file_path=c_temp_file_path,
+                    status="failed",
+                    charitable_data=c_data,
+                    category=ExpenseCategory.CHARITABLE,
+                    error=str(charitable_error),
+                ))
+
         imported_count = sum(1 for r in local_results if r.status == "new")
         failed_count = sum(1 for r in local_results if r.status in {"failed", "duplicate_exact", "duplicate_fuzzy"})
-        total_amount = sum(r.expense.amount for r in local_results if r.status == "new" and r.expense is not None)
+        total_amount = sum(
+            (r.expense.amount if r.expense else r.charitable_data.amount if r.charitable_data else 0)
+            for r in local_results if r.status == "new"
+        )
 
         message = f"Successfully imported {imported_count} receipts"
         if failed_count > 0:
@@ -1030,4 +1275,7 @@ async def bulk_import_confirm(request: BulkImportConfirmRequest):
     finally:
         if legacy_parser is not None:
             await legacy_parser.close()
-        await mcp_client.stop()
+        if hsa_mcp_client is not None:
+            await hsa_mcp_client.stop()
+        if charitable_mcp_client is not None:
+            await charitable_mcp_client.stop()

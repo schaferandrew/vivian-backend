@@ -77,18 +77,23 @@ class ConfirmReceiptResponse(BaseModel):
 
 
 class DuplicateInfo(BaseModel):
-    """Information about a potential duplicate entry."""
-    entry_id: str
-    provider: str
-    service_date: Optional[str] = None
+    """Information about a potential duplicate entry.
+
+    HSA duplicates populate all fields.  Charitable duplicates may only
+    have organization/date/amount, so ``entry_id``, ``provider`` and
+    ``status`` are optional with sensible defaults.
+    """
+    entry_id: str = ""
+    provider: str = ""
+    date: Optional[str] = Field(None, description="Date of service (HSA) or donation (charitable)")
     paid_date: Optional[str] = None
-    amount: float
+    amount: float = 0
     hsa_eligible: bool = True
-    status: str
+    status: str = ""
     reimbursement_date: Optional[str] = None
     drive_file_id: Optional[str] = None
     confidence: float = 0
-    match_type: str = Field(..., description="Type of match: 'exact' or 'fuzzy_date'")
+    match_type: str = Field("exact", description="Type of match: 'exact' or 'fuzzy_date'")
     days_difference: Optional[int] = Field(None, description="Days difference for fuzzy matches")
     message: Optional[str] = Field(None, description="Human-readable duplicate match reason")
 
