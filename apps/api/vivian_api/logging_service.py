@@ -191,6 +191,7 @@ async def start_http_logging(
     """
     global _http_logger_task
     
+    # Return early if logging is disabled, no endpoint provided, or task already running
     if not enable_logging or not logger_endpoint or _http_logger_task is not None:
         return
     
