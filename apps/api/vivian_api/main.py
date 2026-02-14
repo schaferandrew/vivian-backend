@@ -5,7 +5,8 @@ import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -152,7 +153,29 @@ app.include_router(auth_router, prefix="/api/v1")
 # Global Exception Handler
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """Handle all uncaught exceptions."""
+    """Handle all uncaught exceptions.
+    
+    Re-raises HTTPException and RequestValidationError to let FastAPI's
+    default handlers process them with proper status codes.
+    """
+    # Let FastAPI handle its own exceptions with proper status codes
+    if isinstance(exc, (HTTPException, RequestValidationError)):
+        if settings.enable_logging:
+            # Log FastAPI exceptions for observability
+            status_code = exc.status_code if isinstance(exc, HTTPException) else 422
+            log_with_context(
+                logger,
+                "WARNING",
+                f"FastAPI exception: {exc.__class__.__name__}",
+                method=request.method,
+                path=request.url.path,
+                exception_type=exc.__class__.__name__,
+                status_code=status_code,
+            )
+        # Re-raise to let FastAPI's default handlers process them
+        raise exc
+    
+    # Handle other exceptions
     if settings.enable_logging:
         log_with_context(
             logger,
