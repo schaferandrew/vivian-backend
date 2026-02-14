@@ -116,9 +116,11 @@ async def _http_log_sender(endpoint: str) -> None:
                     )
                     batch.append(log_entry)
                 except asyncio.TimeoutError:
-                    pass  # Send what we have if queue is empty for a while
+                    # If no new log arrived and there's nothing pending, just wait again
+                    if not batch:
+                        continue
                 
-                # Send batch when full or timeout
+                # Send batch when full or when we've waited and the queue is idle
                 if batch and (len(batch) >= batch_size or _log_queue.empty()):
                     try:
                         await client.post(
