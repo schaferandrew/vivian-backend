@@ -15,13 +15,14 @@ test = [
 
 [tool.pytest.ini_options]
 testpaths = [
+    "apps/api/tests",
     "apps/test-mcp-server/tests",
-    # Add more as they exist: "apps/api/tests", "packages/shared/tests"
 ]
 asyncio_mode = "auto"
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 pythonpath = [
+    "apps/api",
+    "packages/shared",
     "apps/test-mcp-server",
-    # "apps/api",  # uncomment when ready
 ]

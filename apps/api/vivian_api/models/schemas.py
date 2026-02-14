@@ -4,7 +4,13 @@ from datetime import date
 from typing import Optional
 from pydantic import BaseModel, Field
 
-from vivian_shared.models import ExpenseSchema, ParsedReceipt, ReimbursementStatus
+from vivian_shared.models import (
+    ExpenseSchema,
+    ParsedReceipt,
+    ReimbursementStatus,
+    ExpenseCategory,
+    CharitableDonationSchema,
+)
 
 
 class ReceiptUploadResponse(BaseModel):
@@ -34,6 +40,12 @@ class CheckDuplicateRequest(BaseModel):
     fuzzy_days: int = 3
 
 
+class CheckCharitableDuplicateRequest(BaseModel):
+    """Request to check one charitable donation payload for duplicates."""
+    charitable_data: CharitableDonationSchema
+    fuzzy_days: int = 3
+
+
 class CheckDuplicateResponse(BaseModel):
     """Response from duplicate-check endpoint."""
     is_duplicate: bool
@@ -45,8 +57,10 @@ class CheckDuplicateResponse(BaseModel):
 class ConfirmReceiptRequest(BaseModel):
     """Request to confirm and save a parsed receipt."""
     temp_file_path: str
-    expense_data: ExpenseSchema
-    status: ReimbursementStatus
+    category: ExpenseCategory = ExpenseCategory.HSA
+    expense_data: Optional[ExpenseSchema] = None
+    charitable_data: Optional[CharitableDonationSchema] = None
+    status: Optional[ReimbursementStatus] = None
     reimbursement_date: Optional[date] = None
     notes: Optional[str] = None
     force: bool = Field(default=False, description="Force import even if duplicates detected")
@@ -63,18 +77,23 @@ class ConfirmReceiptResponse(BaseModel):
 
 
 class DuplicateInfo(BaseModel):
-    """Information about a potential duplicate entry."""
-    entry_id: str
-    provider: str
-    service_date: Optional[str] = None
+    """Information about a potential duplicate entry.
+
+    HSA duplicates populate all fields.  Charitable duplicates may only
+    have organization/date/amount, so ``entry_id``, ``provider`` and
+    ``status`` are optional with sensible defaults.
+    """
+    entry_id: str = ""
+    provider: str = ""
+    date: Optional[str] = Field(None, description="Date of service (HSA) or donation (charitable)")
     paid_date: Optional[str] = None
-    amount: float
+    amount: float = 0
     hsa_eligible: bool = True
-    status: str
+    status: str = ""
     reimbursement_date: Optional[str] = None
     drive_file_id: Optional[str] = None
     confidence: float = 0
-    match_type: str = Field(..., description="Type of match: 'exact' or 'fuzzy_date'")
+    match_type: str = Field("exact", description="Type of match: 'exact' or 'fuzzy_date'")
     days_difference: Optional[int] = Field(None, description="Days difference for fuzzy matches")
     message: Optional[str] = Field(None, description="Human-readable duplicate match reason")
 
@@ -94,7 +113,9 @@ class BulkImportFileResult(BaseModel):
     filename: str
     status: str = Field(..., description="Status: new, duplicate_exact, duplicate_fuzzy, flagged, failed, skipped")
     temp_file_path: Optional[str] = None
+    category: Optional[ExpenseCategory] = ExpenseCategory.HSA
     expense: Optional[ExpenseSchema] = None
+    charitable_data: Optional[CharitableDonationSchema] = None
     confidence: float = 0
     duplicate_info: Optional[list[DuplicateInfo]] = None
     error: Optional[str] = None
@@ -151,7 +172,9 @@ class BulkImportConfirmRequest(BaseModel):
 class BulkImportConfirmItem(BaseModel):
     """Single parsed item selected for bulk import."""
     temp_file_path: str
-    expense_data: ExpenseSchema
+    category: ExpenseCategory = ExpenseCategory.HSA
+    expense_data: Optional[ExpenseSchema] = None
+    charitable_data: Optional[CharitableDonationSchema] = None
     status: Optional[ReimbursementStatus] = None
 
 
@@ -169,6 +192,7 @@ class UnreimbursedBalanceResponse(BaseModel):
     """Response with unreimbursed balance."""
     total_amount: float
     count: int
+    is_configured: bool = True  # Whether MCP server is properly configured
 
 
 class HealthCheckResponse(BaseModel):

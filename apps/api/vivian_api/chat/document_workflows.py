@@ -14,18 +14,35 @@ from vivian_api.services.mcp_client import MCPClient
 from vivian_api.services.mcp_registry import get_mcp_server_definitions
 from vivian_api.services.receipt_parser import OpenRouterService
 from vivian_api.utils import validate_temp_file_path, InvalidFilePathError
-from vivian_shared.models import ExpenseSchema, ParsedReceipt
+from vivian_shared.models import (
+    ExpenseSchema,
+    ParsedReceipt,
+    ExpenseCategory,
+    CharitableDonationSchema,
+)
 
 
 logger = logging.getLogger(__name__)
-DocumentType = Literal["hsa_receipt", "charitable_receipt"]
+DocumentType = Literal["receipt", "hsa_receipt", "charitable_receipt"]
+
+
+def _infer_category(parsed_data: dict) -> ExpenseCategory:
+    category_value = str(parsed_data.get("category", "")).lower().strip()
+    if category_value == ExpenseCategory.CHARITABLE.value:
+        return ExpenseCategory.CHARITABLE
+
+    charitable_keys = ("organization_name", "donation_date", "tax_deductible")
+    if any(parsed_data.get(key) for key in charitable_keys):
+        return ExpenseCategory.CHARITABLE
+
+    return ExpenseCategory.HSA
 
 
 class ChatAttachment(BaseModel):
     """Attachment metadata sent from chat clients."""
 
     attachment_id: str = Field(default_factory=lambda: f"att_{uuid.uuid4().hex[:10]}")
-    document_type: DocumentType = "hsa_receipt"
+    document_type: DocumentType = "receipt"
     temp_file_path: str
     filename: str | None = None
     mime_type: str | None = None
@@ -86,12 +103,24 @@ def _compute_receipt_confidence(parsed_data: dict[str, Any]) -> float:
     return max(0, confidence)
 
 
-async def _run_hsa_receipt_workflow(
+def _compute_charitable_confidence(parsed_data: dict[str, Any]) -> float:
+    """Confidence heuristic for charitable receipts."""
+    confidence = 0.9
+    if not parsed_data.get("organization_name"):
+        confidence -= 0.3
+    if not parsed_data.get("donation_date"):
+        confidence -= 0.2
+    if not parsed_data.get("amount") or parsed_data.get("amount") == 0:
+        confidence -= 0.3
+    return max(0, confidence)
+
+
+async def _run_receipt_workflow(
     attachment: ChatAttachment,
     enabled_mcp_servers: list[str],
     settings: Settings,
 ) -> tuple[DocumentWorkflowArtifact, list[dict[str, str]]]:
-    """Parse an HSA receipt and prepare data for confirmation UI."""
+    """Parse a receipt (HSA or charitable) and prepare data for confirmation UI."""
     tools_called: list[dict[str, str]] = []
     parser = OpenRouterService()
 
@@ -109,7 +138,7 @@ async def _run_hsa_receipt_workflow(
         return (
             DocumentWorkflowArtifact(
                 attachment_id=attachment.attachment_id,
-                document_type=attachment.document_type,
+                document_type="receipt",
                 status="parse_error",
                 message="Could not access the uploaded file. Please try uploading again.",
                 temp_file_path=attachment.temp_file_path,
@@ -124,7 +153,7 @@ async def _run_hsa_receipt_workflow(
         return (
             DocumentWorkflowArtifact(
                 attachment_id=attachment.attachment_id,
-                document_type=attachment.document_type,
+                document_type="receipt",
                 status="parse_error",
                 message=f"Could not parse this receipt: {exc}",
                 temp_file_path=attachment.temp_file_path,
@@ -142,7 +171,7 @@ async def _run_hsa_receipt_workflow(
         return (
             DocumentWorkflowArtifact(
                 attachment_id=attachment.attachment_id,
-                document_type=attachment.document_type,
+                document_type="receipt",
                 status="parse_error",
                 message=str(parse_result.get("error", "Failed to parse receipt.")),
                 temp_file_path=attachment.temp_file_path,
@@ -152,35 +181,69 @@ async def _run_hsa_receipt_workflow(
         )
 
     parsed_data = parse_result.get("parsed_data") or {}
-    confidence = _compute_receipt_confidence(parsed_data)
     raw_output = str(parse_result.get("raw_output", ""))
+    
+    # Infer category from parsed data
+    inferred_category = _infer_category(parsed_data)
+    
+    # Compute confidence based on category
+    if inferred_category == ExpenseCategory.CHARITABLE:
+        confidence = _compute_charitable_confidence(parsed_data)
+    else:
+        confidence = _compute_receipt_confidence(parsed_data)
+
+    # Build HSA expense schema
+    hsa_eligible_value = parsed_data.get("hsa_eligible")
+    if not isinstance(hsa_eligible_value, bool):
+        hsa_eligible_value = inferred_category == ExpenseCategory.HSA
 
     expense = ExpenseSchema(
-        provider=parsed_data.get("provider", "Unknown Provider"),
-        service_date=parsed_data.get("service_date"),
-        paid_date=parsed_data.get("paid_date"),
+        provider=parsed_data.get("provider")
+        or parsed_data.get("organization_name")
+        or "Unknown Provider",
+        service_date=parsed_data.get("service_date") or parsed_data.get("donation_date"),
+        paid_date=parsed_data.get("paid_date") or parsed_data.get("donation_date"),
         amount=float(parsed_data.get("amount", 0)),
-        hsa_eligible=parsed_data.get("hsa_eligible", True),
+        hsa_eligible=hsa_eligible_value,
         raw_model_output=raw_output,
     )
+    
+    # Build charitable donation schema
+    donation = CharitableDonationSchema(
+        organization_name=parsed_data.get("organization_name")
+        or parsed_data.get("provider")
+        or "Unknown Organization",
+        donation_date=parsed_data.get("donation_date") or parsed_data.get("service_date"),
+        amount=float(parsed_data.get("amount", 0)),
+        tax_deductible=parsed_data.get("tax_deductible") if parsed_data.get("tax_deductible") is not None else True,
+        description=parsed_data.get("description"),
+        raw_model_output=raw_output,
+    )
+    
     parsed_receipt = ParsedReceipt(
+        suggested_category=inferred_category,
         expense=expense,
+        charitable_data=donation,
         confidence=confidence,
         parsing_errors=[] if confidence > 0.7 else ["Low confidence in some fields"],
     )
 
+    # Run duplicate check based on inferred category
+    # Note: If MCP servers aren't configured, duplicate checks gracefully fail
+    # and the error is surfaced to the user. Final duplicate checks still run at save time.
     duplicate_check_error: str | None = None
     duplicate_info: list[dict[str, Any]] = []
     is_duplicate = False
 
-    definition = get_mcp_server_definitions(settings).get("vivian_hsa")
-    if expense.hsa_eligible:
-        if "vivian_hsa" not in enabled_mcp_servers:
+    if inferred_category == ExpenseCategory.HSA and expense.hsa_eligible:
+        # HSA duplicate check
+        definition = get_mcp_server_definitions(settings).get("hsa_ledger")
+        if "hsa_ledger" not in enabled_mcp_servers:
             duplicate_check_error = (
-                "Vivian HSA MCP server is disabled in this chat. Enable it to run duplicate checks."
+                "HSA Ledger MCP server is disabled or not configured. Enable it and set required folder/sheet IDs to run duplicate checks."
             )
         elif not definition:
-            duplicate_check_error = "Vivian HSA MCP server configuration is unavailable."
+            duplicate_check_error = "HSA Ledger MCP server configuration is unavailable."
         else:
             mcp_client = MCPClient(
                 definition.command,
@@ -210,15 +273,61 @@ async def _run_hsa_receipt_workflow(
                 duplicate_check_error = f"Duplicate check unavailable: {dup_exc}"
             finally:
                 await mcp_client.stop()
+    
+    elif inferred_category == ExpenseCategory.CHARITABLE:
+        # Charitable duplicate check
+        definition = get_mcp_server_definitions(settings).get("charitable_ledger")
+        if "charitable_ledger" not in enabled_mcp_servers:
+            duplicate_check_error = (
+                "Charitable Ledger MCP server is disabled or not configured. Enable it and set required folder/sheet IDs to run duplicate checks."
+            )
+        elif not definition:
+            duplicate_check_error = "Charitable Ledger MCP server configuration is unavailable."
+        else:
+            mcp_client = MCPClient(
+                definition.command,
+                server_path_override=definition.server_path,
+            )
+            try:
+                await mcp_client.start()
+                dup_result = await mcp_client.check_charitable_duplicates(donation.model_dump())
+                # Normalize charitable duplicates to match expected field names
+                from vivian_api.routers.receipts import _normalize_charitable_duplicate
+                raw_dups = dup_result.get("potential_duplicates") or []
+                duplicate_info = [
+                    _normalize_charitable_duplicate(item)
+                    for item in raw_dups
+                    if isinstance(item, dict)
+                ]
+                is_duplicate = bool(dup_result.get("is_duplicate"))
+                if dup_result.get("check_error"):
+                    duplicate_check_error = str(dup_result.get("check_error"))
 
-    message = "Receipt parsed. Review and confirm to finish importing it."
-    if not expense.hsa_eligible:
+                tools_called.append(
+                    {
+                        "server_id": definition.id,
+                        "tool_name": "check_charitable_duplicates",
+                        "input": _json_compact({"donation_json": donation.model_dump()}),
+                        "output": _json_compact(dup_result),
+                    }
+                )
+            except Exception as dup_exc:
+                duplicate_check_error = f"Duplicate check unavailable: {dup_exc}"
+            finally:
+                await mcp_client.stop()
+
+    # Build message based on category
+    if inferred_category == ExpenseCategory.CHARITABLE:
+        message = "Charitable receipt parsed. Review and confirm to finish importing it."
+    elif not expense.hsa_eligible:
         message = "Receipt parsed as not HSA-eligible. Review before saving."
+    else:
+        message = "Receipt parsed. Review and confirm to finish importing it."
 
     return (
         DocumentWorkflowArtifact(
             attachment_id=attachment.attachment_id,
-            document_type=attachment.document_type,
+            document_type="receipt",
             status="ready_for_confirmation",
             message=message,
             temp_file_path=attachment.temp_file_path,
@@ -232,33 +341,12 @@ async def _run_hsa_receipt_workflow(
     )
 
 
-async def _run_charitable_receipt_workflow(
-    attachment: ChatAttachment,
-    _enabled_mcp_servers: list[str],
-    _settings: Settings,
-) -> tuple[DocumentWorkflowArtifact, list[dict[str, str]]]:
-    """Placeholder for future charitable receipt flow."""
-    return (
-        DocumentWorkflowArtifact(
-            attachment_id=attachment.attachment_id,
-            document_type=attachment.document_type,
-            status="unsupported",
-            message=(
-                "Charitable receipt workflows are not implemented yet. "
-                "This upload is ready for future support."
-            ),
-            temp_file_path=attachment.temp_file_path,
-            filename=attachment.filename,
-        ),
-        [],
-    )
-
-
 def get_document_workflow_registry() -> dict[str, DocumentWorkflowHandler]:
     """Return document type -> workflow handler map."""
     return {
-        "hsa_receipt": _run_hsa_receipt_workflow,
-        "charitable_receipt": _run_charitable_receipt_workflow,
+        "receipt": _run_receipt_workflow,
+        "hsa_receipt": _run_receipt_workflow,         # backward compat
+        "charitable_receipt": _run_receipt_workflow,  # backward compat
     }
 
 

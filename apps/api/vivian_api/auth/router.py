@@ -47,6 +47,10 @@ def _utc_now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _client_ip(request: Request) -> str | None:
     if not request.client:
         return None
@@ -184,8 +188,11 @@ def refresh(
     if not current_session:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
 
-    now = _utc_now_naive()
-    if current_session.revoked_at is not None or current_session.expires_at <= now:
+    now = _utc_now()
+    expires_at = current_session.expires_at
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if current_session.revoked_at is not None or (expires_at is not None and expires_at <= now):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token expired")
 
     current_session.revoked_at = now

@@ -21,13 +21,52 @@ class MCPClient:
         server_command: list[str],
         process_env: Optional[dict[str, str]] = None,
         server_path_override: Optional[str] = None,
+        mcp_server_id: Optional[str] = None,
     ):
         self.server_command = server_command
         self.process_env = process_env
         self.server_path_override = server_path_override
+        self.mcp_server_id = mcp_server_id
         self._session: Optional[ClientSession] = None
         self._stdio_cm: Optional[AbstractAsyncContextManager] = None
         self._session_started = False
+    
+    @classmethod
+    async def from_db(
+        cls,
+        server_command: list[str],
+        home_id: str,
+        mcp_server_id: str,
+        db: "Session",
+        server_path_override: Optional[str] = None,
+    ) -> "MCPClient":
+        """Create an MCPClient with database-backed configuration.
+        
+        This factory method loads Google connection tokens and MCP settings
+        from the database and builds the environment for the subprocess.
+        
+        Args:
+            server_command: The MCP server command to run
+            home_id: The home ID to load configuration for
+            mcp_server_id: The MCP server ID to load settings for
+            db: Database session
+            server_path_override: Optional path override for server CWD
+            
+        Returns:
+            Configured MCPClient instance
+        """
+        from vivian_api.config import Settings
+        from vivian_api.services.google_integration import build_mcp_env_from_db
+        
+        settings = Settings()
+        env = await build_mcp_env_from_db(home_id, mcp_server_id, db, settings)
+        
+        return cls(
+            server_command=server_command,
+            process_env=env,
+            server_path_override=server_path_override,
+            mcp_server_id=mcp_server_id,
+        )
     
     async def start(self):
         """Start the MCP server process."""
@@ -142,6 +181,43 @@ class MCPClient:
         
         content = result.get("content", [{}])[0].get("text", "{}")
         return json.loads(content)
+
+    async def upload_charitable_receipt_to_drive(
+        self,
+        local_file_path: str,
+        donation_year: Optional[int] = None,
+        filename: Optional[str] = None,
+    ) -> dict:
+        """Upload charitable receipt to Google Drive."""
+        payload = {
+            "local_file_path": local_file_path,
+        }
+        if donation_year is not None:
+            payload["tax_year"] = str(donation_year)
+        if filename:
+            payload["filename"] = filename
+
+        result = await self.call_tool("upload_charitable_receipt_to_drive", payload)
+        content = result.get("content", [{}])[0].get("text", "{}")
+        return json.loads(content)
+
+    async def append_charitable_donation_to_ledger(
+        self,
+        donation_json: dict,
+        drive_file_id: str,
+        force_append: bool = False,
+    ) -> dict:
+        """Append charitable donation to ledger."""
+        payload = {
+            "donation_json": donation_json,
+            "drive_file_id": drive_file_id,
+        }
+        if force_append:
+            payload["force_append"] = True
+
+        result = await self.call_tool("append_charitable_donation_to_ledger", payload)
+        content = result.get("content", [{}])[0].get("text", "{}")
+        return json.loads(content)
     
     async def check_for_duplicates(
         self,
@@ -163,6 +239,28 @@ class MCPClient:
             payload["fuzzy_days"] = fuzzy_days
         result = await self.call_tool("check_for_duplicates", payload)
         
+        content = result.get("content", [{}])[0].get("text", "{}")
+        return json.loads(content)
+
+    async def check_charitable_duplicates(
+        self,
+        donation_json: dict,
+        fuzzy_days: int = 3
+    ) -> dict:
+        """Check for duplicate charitable donations in the ledger.
+
+        Args:
+            donation_json: Donation data with organization_name, donation_date, amount
+            fuzzy_days: Number of days to allow for fuzzy date matching
+
+        Returns:
+            Dict with is_duplicate, potential_duplicates, recommendation
+        """
+        payload = {"donation_json": donation_json}
+        if fuzzy_days != 3:
+            payload["fuzzy_days"] = fuzzy_days
+        result = await self.call_tool("check_charitable_duplicates", payload)
+
         content = result.get("content", [{}])[0].get("text", "{}")
         return json.loads(content)
 
@@ -222,13 +320,13 @@ class MCPClient:
         if self._session:
             try:
                 await self._session.__aexit__(None, None, None)
-            except Exception:
+            except BaseException:
                 pass
             self._session = None
         if self._stdio_cm:
             try:
                 await self._stdio_cm.__aexit__(None, None, None)
-            except Exception:
+            except BaseException:
                 pass
             self._stdio_cm = None
         self._session_started = False

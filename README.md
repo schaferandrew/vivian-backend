@@ -103,33 +103,34 @@ curl http://localhost:8000/health
 
 ### Running Tests
 
-Tests are organized by app. Currently, MCP server tests are configured.
+Tests are organized by app (API and MCP server). Use the helper script for consistent runs.
 
-**Option 1: Full path (no activation needed)**
+**Setup (one time)**
 ```bash
-apps/test-mcp-server/venv/bin/pytest apps/test-mcp-server/tests/ -v
-```
+cd apps/api
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[test]"
 
-**Option 2: Activate venv manually**
-```bash
-cd apps/test-mcp-server
-source venv/bin/activate
-pytest tests/ -v
-```
-
-**Option 3: Using .envrc (Recommended)**
-```bash
-# First time only: set up venv
-cd apps/test-mcp-server
+cd ../test-mcp-server
 python3 -m venv venv
 source venv/bin/activate
 pip install -e ".[test]"
+```
 
-# Then from project root, use the helper
+**Run tests (recommended)**
+```bash
+scripts/run-tests.sh api   # API tests only
+scripts/run-tests.sh mcp   # MCP tests only
+scripts/run-tests.sh all   # both suites
+```
+
+**Optional: .envrc aliases**
+```bash
 source .envrc
-test-mcp  # Runs only MCP tests
-# or
-pytest  # Runs all tests
+test-api
+test-mcp
+test-all
 ```
 
 ### Database Migrations (Alembic)

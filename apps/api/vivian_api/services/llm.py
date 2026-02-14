@@ -1,7 +1,7 @@
 """LLM service for OpenRouter and Ollama integration."""
 
 import httpx
-from vivian_api.config import Settings, get_selected_model, AVAILABLE_MODELS
+from vivian_api.config import Settings, get_selected_model, AVAILABLE_MODELS, get_ollama_base_url
 
 
 def _is_ollama_model(model_id: str) -> bool:
@@ -120,9 +120,32 @@ async def _get_openrouter_completion(messages: list[dict], model: str, web_searc
         return data["choices"][0]["message"]["content"]
 
 
+class OllamaTimeoutError(Exception):
+    """Raised when Ollama takes too long to respond (model loading or inference)."""
+
+    def __init__(self, model: str, timeout: float):
+        self.model = model
+        self.timeout = timeout
+        super().__init__(
+            f"Ollama timed out after {int(timeout)}s for model '{model}'. "
+            "The model may still be loading — try again in a moment."
+        )
+
+
+class OllamaConnectionError(Exception):
+    """Raised when Ollama is unreachable."""
+
+    def __init__(self, model: str, detail: str = ""):
+        self.model = model
+        msg = f"Could not connect to Ollama for model '{model}'."
+        if detail:
+            msg += f" {detail}"
+        super().__init__(msg)
+
+
 async def _get_ollama_completion(messages: list[dict], model: str) -> str:
     """Get chat completion from Ollama local API."""
-    ollama_url = Settings.get_ollama_base_url()
+    ollama_url = get_ollama_base_url()
     # Strip "ollama/" prefix if present
     ollama_model = model.replace("ollama/", "")
     
@@ -132,15 +155,24 @@ async def _get_ollama_completion(messages: list[dict], model: str) -> str:
         "stream": False,
     }
     
+    # Ollama can take a long time on first request while loading model into
+    # memory, especially on low-VRAM machines. Use a generous timeout.
+    timeout = httpx.Timeout(300.0, connect=10.0)
+
     async with httpx.AsyncClient() as client:
         print(f"Ollama URL: {ollama_url}/api/chat")
         print(f"Ollama Model: {ollama_model}")
         
-        response = await client.post(
-            f"{ollama_url}/api/chat",
-            json=payload,
-            timeout=120.0
-        )
+        try:
+            response = await client.post(
+                f"{ollama_url}/api/chat",
+                json=payload,
+                timeout=timeout,
+            )
+        except httpx.TimeoutException:
+            raise OllamaTimeoutError(ollama_model, timeout.read or 300.0)
+        except httpx.ConnectError:
+            raise OllamaConnectionError(ollama_model, "Is Ollama running?")
         
         print(f"Ollama response status: {response.status_code}")
         

@@ -19,7 +19,13 @@ from vivian_api.chat.session import session_manager
 from vivian_api.chat.handler import chat_handler
 from vivian_api.chat.message_protocol import ChatMessage
 from vivian_api.chat.personality import VivianPersonality
-from vivian_api.services.llm import get_chat_completion, OpenRouterCreditsError, OpenRouterRateLimitError
+from vivian_api.services.llm import (
+    get_chat_completion,
+    OpenRouterCreditsError,
+    OpenRouterRateLimitError,
+    OllamaTimeoutError,
+    OllamaConnectionError,
+)
 from vivian_api.config import (
     AVAILABLE_MODELS,
     DEFAULT_MODEL,
@@ -416,7 +422,7 @@ async def list_models(
     _current_user: CurrentUserContext = Depends(get_current_user_context),
 ):
     """List available OpenRouter models with provider status."""
-    ollama_status = check_ollama_status()
+    ollama_status = await check_ollama_status()
     
     providers = {
         "OpenAI": {"status": "available"},
@@ -450,7 +456,7 @@ async def select_model(
     _current_user: CurrentUserContext = Depends(get_current_user_context),
 ):
     """Change the active model (in-memory)."""
-    ollama_status = check_ollama_status()
+    ollama_status = await check_ollama_status()
     
     valid_ids = [m["id"] for m in AVAILABLE_MODELS]
     if request.model_id not in valid_ids:
@@ -640,13 +646,25 @@ async def chat_message(
                     status_code=429,
                     content={"error": "rate_limit", "message": e.message},
                 )
+            except OllamaTimeoutError as e:
+                print(f"Ollama timeout: {e}")
+                return JSONResponse(
+                    status_code=504,
+                    content={"error": "ollama_timeout", "message": str(e)},
+                )
+            except OllamaConnectionError as e:
+                print(f"Ollama connection error: {e}")
+                return JSONResponse(
+                    status_code=502,
+                    content={"error": "ollama_unavailable", "message": str(e)},
+                )
             except Exception as e:
                 print(f"Error getting chat completion: {e}")
                 import traceback
                 traceback.print_exc()
                 return JSONResponse(
                     status_code=500,
-                    content={"error": "server_error", "message": str(e)},
+                    content={"error": "server_error", "message": str(e) or "An unexpected error occurred."},
                 )
 
     # Store assistant response in PostgreSQL if chat exists
