@@ -15,7 +15,8 @@ from typing import Optional
 import httpx
 
 # Global queue for async HTTP logging
-_log_queue: asyncio.Queue = asyncio.Queue()
+LOG_QUEUE_MAXSIZE = 1000
+_log_queue: asyncio.Queue = asyncio.Queue(maxsize=LOG_QUEUE_MAXSIZE)
 _http_logger_task: Optional[asyncio.Task] = None
 
 
