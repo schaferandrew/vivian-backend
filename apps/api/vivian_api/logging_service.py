@@ -203,8 +203,6 @@ async def start_http_logging(
     
     def emit_http(record: LogRecord) -> None:
         """Emit log to queue for HTTP sender."""
-        if not enable_logging:
-            return
         msg = StructuredFormatter().format(record)
         try:
             _log_queue.put_nowait(msg)
