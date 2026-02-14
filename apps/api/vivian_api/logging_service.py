@@ -235,12 +235,23 @@ def log_with_context(
     """
     if not logger.isEnabledFor(getattr(logging, level.upper(), logging.INFO)):
         return
+
+    # Determine caller information for more useful log records
+    pathname = "(unknown file)"
+    lineno = 0
+    try:
+        frame = sys._getframe(1)
+        pathname = frame.f_code.co_filename
+        lineno = frame.f_lineno
+    except (AttributeError, ValueError):
+        # Fall back to defaults if frame information is unavailable
+        pass
     
     record = logger.makeRecord(
         logger.name,
         getattr(logging, level.upper(), logging.INFO),
-        "(unknown file)",
-        0,
+        pathname,
+        lineno,
         message,
         (),
         None,
