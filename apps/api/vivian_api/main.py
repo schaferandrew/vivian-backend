@@ -174,8 +174,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     """Health check endpoint."""
-    if settings.enable_logging:
-        logger.debug("Health check")
     return HealthCheckResponse(status="healthy")
 
 
