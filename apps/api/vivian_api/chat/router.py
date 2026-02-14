@@ -1,5 +1,6 @@
 """Chat WebSocket router."""
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
@@ -39,6 +40,9 @@ from vivian_api.db.database import get_db
 from vivian_api.repositories import ChatMessageRepository, ChatRepository
 from vivian_api.services.mcp_client import MCPClient, MCPClientError
 from vivian_api.services.mcp_registry import get_mcp_server_definitions, normalize_enabled_server_ids
+from vivian_api.logging_service import log_with_context
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -717,17 +721,38 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         # Accept connection and get/create session
         session = await connection_manager.connect(websocket)
-        print(f"WebSocket connected: session {session.session_id}")
+        log_with_context(
+            logger,
+            "INFO",
+            "WebSocket connected",
+            service="chat",
+            session_id=session.session_id,
+        )
         
         # Send welcome/handshake
         await chat_handler._handle_handshake(session)
-        print(f"Handshake sent for session {session.session_id}")
+        log_with_context(
+            logger,
+            "DEBUG",
+            "Handshake sent",
+            service="chat",
+            session_id=session.session_id,
+        )
         
         while True:
             try:
                 # Receive and parse message
                 data = await websocket.receive_json()
-                print(f"Received message: {data}")
+                message_type = data.get("type", "unknown")
+                
+                log_with_context(
+                    logger,
+                    "DEBUG",
+                    "Message received",
+                    service="chat",
+                    session_id=session.session_id,
+                    message_type=message_type,
+                )
                 
                 message = ChatMessage(**data)
                 message.session_id = session.session_id
@@ -736,6 +761,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 await chat_handler.handle_message(session, message)
 
             except OpenRouterCreditsError as e:
+                log_with_context(
+                    logger,
+                    "WARNING",
+                    "OpenRouter credits error",
+                    service="chat",
+                    session_id=session.session_id if session else None,
+                    error=e.message,
+                )
                 await connection_manager.send_error(
                     session,
                     error_id="insufficient_credits",
@@ -745,6 +778,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     recovery_options=[{"id": "retry", "label": "Try again"}],
                 )
             except OpenRouterRateLimitError as e:
+                log_with_context(
+                    logger,
+                    "WARNING",
+                    "OpenRouter rate limit",
+                    service="chat",
+                    session_id=session.session_id if session else None,
+                    error=e.message,
+                )
                 await connection_manager.send_error(
                     session,
                     error_id="rate_limit",
@@ -754,13 +795,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     recovery_options=[{"id": "retry", "label": "Try again"}],
                 )
             except Exception as e:
-                print(f"Error handling message: {e}")
-                import traceback
-                traceback.print_exc()
+                log_with_context(
+                    logger,
+                    "ERROR",
+                    "Error handling message",
+                    service="chat",
+                    session_id=session.session_id if session else None,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
                 # Send error back to client
                 await connection_manager.send_error(
                     session,
-                    error_id=f"msg_error_{session.session_id}",
+                    error_id=f"msg_error_{session.session_id}" if session else "msg_error",
                     category="system_error",
                     severity="recoverable",
                     message=f"I couldn't process that message: {str(e)}",
@@ -770,12 +817,24 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 
     except WebSocketDisconnect:
-        print(f"Client disconnected from session {session.session_id}")
+        log_with_context(
+            logger,
+            "INFO",
+            "WebSocket disconnected",
+            service="chat",
+            session_id=session.session_id if session else None,
+        )
         if session:
             connection_manager.disconnect(websocket)
     except Exception as e:
-        print(f"WebSocket error: {e}")
-        import traceback
-        traceback.print_exc()
+        log_with_context(
+            logger,
+            "ERROR",
+            "WebSocket error",
+            service="chat",
+            session_id=session.session_id if session else None,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
         if session:
             connection_manager.disconnect(websocket)

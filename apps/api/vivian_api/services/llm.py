@@ -1,7 +1,14 @@
 """LLM service for OpenRouter and Ollama integration."""
 
+import logging
+import time
+
 import httpx
+
 from vivian_api.config import Settings, get_selected_model, AVAILABLE_MODELS, get_ollama_base_url
+from vivian_api.logging_service import log_with_context
+
+logger = logging.getLogger(__name__)
 
 
 def _is_ollama_model(model_id: str) -> bool:
@@ -50,6 +57,7 @@ async def get_chat_completion(messages: list[dict], web_search_enabled: bool = F
 async def _get_openrouter_completion(messages: list[dict], model: str, web_search_enabled: bool = False) -> str:
     """Get chat completion from OpenRouter API."""
     settings = Settings()
+    start_time = time.time()
 
     headers = {
         "Authorization": f"Bearer {settings.openrouter_api_key}",
@@ -64,13 +72,17 @@ async def _get_openrouter_completion(messages: list[dict], model: str, web_searc
         "plugins": [{"id": "web"}] if web_search_enabled else [{"id": "web", "enabled": False}],
     }
 
+    log_with_context(
+        logger,
+        "DEBUG",
+        "Calling OpenRouter API",
+        service="llm",
+        model=model,
+        message_count=len(messages),
+        web_search_enabled=web_search_enabled,
+    )
+
     async with httpx.AsyncClient() as client:
-        print(f"OpenRouter URL: {settings.openrouter_base_url}/chat/completions")
-        print(f"Model: {model}")
-        print(f"Plugins: {payload['plugins']}")
-        print(f"Web search enabled: {web_search_enabled}")
-        print(f"API Key (first 10 chars): {settings.openrouter_api_key[:10]}...")
-        
         response = await client.post(
             f"{settings.openrouter_base_url}/chat/completions",
             headers=headers,
@@ -78,7 +90,7 @@ async def _get_openrouter_completion(messages: list[dict], model: str, web_searc
             timeout=60.0
         )
         
-        print(f"OpenRouter response status: {response.status_code}")
+        duration_ms = (time.time() - start_time) * 1000
 
         if response.status_code == 402:
             try:
@@ -89,6 +101,15 @@ async def _get_openrouter_completion(messages: list[dict], model: str, web_searc
                 )
             except Exception:
                 msg = "Your account or API key has insufficient credits. Add more credits and retry."
+            log_with_context(
+                logger,
+                "ERROR",
+                "OpenRouter credits error",
+                service="llm",
+                model=model,
+                duration_ms=round(duration_ms, 2),
+                status_code=402,
+            )
             raise OpenRouterCreditsError(msg)
 
         if response.status_code == 429:
@@ -101,6 +122,15 @@ async def _get_openrouter_completion(messages: list[dict], model: str, web_searc
                 msg = f"{base_msg} for {model}. Free models have strict rate limits. Try again in a few moments or switch to a paid model."
             except Exception:
                 msg = f"Rate limit exceeded for {model}. Free models have strict rate limits. Try again in a few moments or switch to a paid model."
+            log_with_context(
+                logger,
+                "WARNING",
+                "OpenRouter rate limit exceeded",
+                service="llm",
+                model=model,
+                duration_ms=round(duration_ms, 2),
+                status_code=429,
+            )
             raise OpenRouterRateLimitError(msg)
 
         if response.status_code == 404:
@@ -112,10 +142,29 @@ async def _get_openrouter_completion(messages: list[dict], model: str, web_searc
                 )
             except Exception:
                 msg = "Model not found or unavailable."
+            log_with_context(
+                logger,
+                "ERROR",
+                "OpenRouter model not found",
+                service="llm",
+                model=model,
+                duration_ms=round(duration_ms, 2),
+                status_code=404,
+            )
             raise OpenRouterCreditsError(f"Model error: {msg}")
 
         response.raise_for_status()
         data = response.json()
+        
+        log_with_context(
+            logger,
+            "DEBUG",
+            "OpenRouter API call completed",
+            service="llm",
+            model=model,
+            duration_ms=round(duration_ms, 2),
+            status_code=response.status_code,
+        )
 
         return data["choices"][0]["message"]["content"]
 
@@ -148,6 +197,7 @@ async def _get_ollama_completion(messages: list[dict], model: str) -> str:
     ollama_url = get_ollama_base_url()
     # Strip "ollama/" prefix if present
     ollama_model = model.replace("ollama/", "")
+    start_time = time.time()
     
     payload = {
         "model": ollama_model,
@@ -159,24 +209,57 @@ async def _get_ollama_completion(messages: list[dict], model: str) -> str:
     # memory, especially on low-VRAM machines. Use a generous timeout.
     timeout = httpx.Timeout(300.0, connect=10.0)
 
+    log_with_context(
+        logger,
+        "DEBUG",
+        "Calling Ollama API",
+        service="llm",
+        model=ollama_model,
+        message_count=len(messages),
+    )
+
     async with httpx.AsyncClient() as client:
-        print(f"Ollama URL: {ollama_url}/api/chat")
-        print(f"Ollama Model: {ollama_model}")
-        
         try:
             response = await client.post(
                 f"{ollama_url}/api/chat",
                 json=payload,
                 timeout=timeout,
             )
+            duration_ms = (time.time() - start_time) * 1000
         except httpx.TimeoutException:
+            duration_ms = (time.time() - start_time) * 1000
+            log_with_context(
+                logger,
+                "ERROR",
+                "Ollama timeout",
+                service="llm",
+                model=ollama_model,
+                duration_ms=round(duration_ms, 2),
+            )
             raise OllamaTimeoutError(ollama_model, timeout.read or 300.0)
         except httpx.ConnectError:
+            duration_ms = (time.time() - start_time) * 1000
+            log_with_context(
+                logger,
+                "ERROR",
+                "Ollama connection error",
+                service="llm",
+                model=ollama_model,
+                duration_ms=round(duration_ms, 2),
+            )
             raise OllamaConnectionError(ollama_model, "Is Ollama running?")
-        
-        print(f"Ollama response status: {response.status_code}")
         
         response.raise_for_status()
         data = response.json()
+        
+        log_with_context(
+            logger,
+            "DEBUG",
+            "Ollama API call completed",
+            service="llm",
+            model=ollama_model,
+            duration_ms=round(duration_ms, 2),
+            status_code=response.status_code,
+        )
         
         return data["message"]["content"]

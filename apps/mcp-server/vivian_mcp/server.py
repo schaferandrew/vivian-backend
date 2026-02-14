@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import logging
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -16,11 +18,39 @@ from vivian_mcp.tools.drive_tools import DriveToolManager
 from vivian_mcp.tools.charitable_tools import CharitableToolManager
 from vivian_mcp.config import Settings
 
+# Import logging service - we'll copy it to mcp-server or follow similar pattern
+logger = logging.getLogger(__name__)
+
+# Simple logging setup for MCP server (will use same pattern as API)
+def setup_mcp_logging(settings: Settings) -> None:
+    """Initialize logging for MCP server."""
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
+    
+    # Clear existing handlers
+    root_logger.handlers.clear()
+    
+    # Console handler with basic formatting
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
+    formatter = logging.Formatter(
+        '[%(levelname)s] %(asctime)s %(name)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    handler.setFormatter(formatter)
+    root_logger.addHandler(handler)
+
 
 @asynccontextmanager
 async def app_lifespan(server: Server) -> AsyncIterator[Settings]:
     """Manage application lifecycle."""
     settings = Settings()
+    
+    # Initialize logging
+    if settings.enable_logging:
+        setup_mcp_logging(settings)
+        logger.info(f"MCP server (environment={settings.environment}, loglevel={settings.log_level})")
+    
     yield settings
 
 

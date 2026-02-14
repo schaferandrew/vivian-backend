@@ -3,6 +3,7 @@
 import base64
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -10,6 +11,7 @@ import httpx
 
 from vivian_api.config import Settings
 from vivian_api.utils import validate_temp_file_path, InvalidFilePathError
+from vivian_api.logging_service import log_with_context
 
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,9 @@ class OpenRouterService:
     
     async def parse_receipt(self, pdf_path: str) -> dict:
         """Parse a receipt PDF using OpenRouter vision model."""
+        start_time = time.time()
+        logger.debug(f"Starting receipt parsing for {pdf_path}")
+        
         # Validate file path to prevent path traversal attacks
         try:
             validated_path = validate_temp_file_path(
@@ -65,9 +70,13 @@ class OpenRouterService:
                 self.settings.temp_upload_dir
             )
         except (InvalidFilePathError, FileNotFoundError) as exc:
-            logger.warning(
-                "File validation failed in receipt parser",
-                extra={"error_type": type(exc).__name__}
+            log_with_context(
+                logger,
+                "WARNING",
+                "File validation failed",
+                service="receipt_parser",
+                error_type=type(exc).__name__,
+                file_path=pdf_path,
             )
             return {
                 "success": False,
@@ -78,6 +87,15 @@ class OpenRouterService:
         with open(validated_path, "rb") as f:
             pdf_content = f.read()
             pdf_base64 = base64.b64encode(pdf_content).decode("utf-8")
+        
+        log_with_context(
+            logger,
+            "DEBUG",
+            "PDF loaded and encoded",
+            service="receipt_parser",
+            file_size_bytes=len(pdf_content),
+            encoded_size_bytes=len(pdf_base64),
+        )
         
         # Prepare message with PDF as image (OpenRouter supports PDF as base64 image)
         messages = [
@@ -99,19 +117,50 @@ class OpenRouterService:
         ]
         
         # Call OpenRouter
-        response = await self.client.post(
-            "/chat/completions",
-            json={
-                "model": self.settings.openrouter_model,
-                "messages": messages,
-                "max_tokens": 1000,
-                "temperature": 0.1,
-                "plugins": [{"id": "web", "enabled": False}],  # Explicitly disable web search to avoid unexpected charges
-            }
+        api_start = time.time()
+        log_with_context(
+            logger,
+            "DEBUG",
+            "Calling OpenRouter API",
+            service="receipt_parser",
+            model=self.settings.openrouter_model,
         )
         
-        response.raise_for_status()
-        data = response.json()
+        try:
+            response = await self.client.post(
+                "/chat/completions",
+                json={
+                    "model": self.settings.openrouter_model,
+                    "messages": messages,
+                    "max_tokens": 1000,
+                    "temperature": 0.1,
+                    "plugins": [{"id": "web", "enabled": False}],  # Explicitly disable web search to avoid unexpected charges
+                }
+            )
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            api_duration = time.time() - api_start
+            log_with_context(
+                logger,
+                "DEBUG",
+                "OpenRouter API call completed",
+                service="receipt_parser",
+                duration_ms=round(api_duration * 1000, 2),
+                status_code=response.status_code,
+            )
+        except httpx.HTTPError as e:
+            api_duration = time.time() - api_start
+            log_with_context(
+                logger,
+                "ERROR",
+                "OpenRouter API call failed",
+                service="receipt_parser",
+                error=str(e),
+                duration_ms=round(api_duration * 1000, 2),
+            )
+            raise
         
         # Extract content from response
         content = data["choices"][0]["message"]["content"]
@@ -127,6 +176,16 @@ class OpenRouterService:
             else:
                 parsed = json.loads(content)
             
+            total_duration = time.time() - start_time
+            log_with_context(
+                logger,
+                "INFO",
+                "Receipt parsed successfully",
+                service="receipt_parser",
+                duration_ms=round(total_duration * 1000, 2),
+                category=parsed.get("category", "unknown"),
+            )
+            
             return {
                 "success": True,
                 "parsed_data": parsed,
@@ -135,6 +194,14 @@ class OpenRouterService:
             }
             
         except json.JSONDecodeError as e:
+            log_with_context(
+                logger,
+                "ERROR",
+                "Failed to parse JSON from model output",
+                service="receipt_parser",
+                error=str(e),
+                duration_ms=round((time.time() - start_time) * 1000, 2),
+            )
             return {
                 "success": False,
                 "error": f"Failed to parse JSON from model output: {str(e)}",

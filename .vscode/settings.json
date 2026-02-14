@@ -13,5 +13,8 @@
     "[python]": {
         "editor.defaultFormatter": "ms-python.black-formatter",
         "editor.formatOnSave": true
+    },
+    "chat.tools.terminal.autoApprove": {
+        "git checkout": true
     }
 }

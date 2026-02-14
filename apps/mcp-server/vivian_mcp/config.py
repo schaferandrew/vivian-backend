@@ -10,6 +10,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """MCP server settings."""
     
+    # Logging settings
+    environment: str = "development"  # development, staging, or production
+    log_level: str = ""  # Empty defaults to environment-specific level
+    logger_endpoint: str | None = None  # HTTP endpoint for third-party logging (staging/production)
+    enable_logging: bool = True  # Toggle logging on/off
+    
     # Google OAuth
     google_client_id: str = ""
     google_client_secret: str = ""
@@ -39,6 +45,15 @@ class Settings(BaseSettings):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        
+        # Set default log level based on environment if not explicitly set
+        if not self.log_level:
+            if self.environment == "development":
+                self.log_level = "DEBUG"
+            elif self.environment == "staging":
+                self.log_level = "INFO"
+            else:  # production
+                self.log_level = "WARNING"
 
         # Backward-compatible fallback for deployments that only define API-prefixed vars.
         fallback_env = {

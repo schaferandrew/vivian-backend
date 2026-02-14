@@ -190,6 +190,13 @@ class Settings(BaseSettings):
     google_oauth_error_redirect: str = "http://localhost:3000/settings?google=error"
     # Note: token store path is now deprecated; tokens stored in DB
     google_oauth_token_store_path: str = "/tmp/vivian-uploads/google-oauth.json"
+    
+    # Logging settings
+    environment: str = "development"  # development, staging, or production
+    log_level: str = ""  # Empty defaults to environment-specific level
+    logger_endpoint: Optional[str] = None  # HTTP endpoint for third-party logging (staging/production)
+    enable_logging: bool = True  # Toggle logging on/off
+    
     class Config:
         env_file = ".env"
         env_prefix = "VIVIAN_API_"
@@ -203,6 +210,15 @@ class Settings(BaseSettings):
         # Also check for non-prefixed DATABASE_URL
         if "DATABASE_URL" in os.environ and not self.database_url:
             self.database_url = os.environ["DATABASE_URL"]
+        
+        # Set default log level based on environment if not explicitly set
+        if not self.log_level:
+            if self.environment == "development":
+                self.log_level = "DEBUG"
+            elif self.environment == "staging":
+                self.log_level = "INFO"
+            else:  # production
+                self.log_level = "WARNING"
 
         # Note: Per-server settings (MCP tool configurations) are now stored in the database
         # and managed via the /mcp/servers/{server_id}/settings endpoints.

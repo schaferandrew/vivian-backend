@@ -1,12 +1,18 @@
 """MCP client service for communicating with MCP server."""
 
 import json
+import logging
+import time
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Optional
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.types import TextContent
+
+from vivian_api.logging_service import log_with_context
+
+logger = logging.getLogger(__name__)
 
 
 class MCPClientError(Exception):
@@ -85,6 +91,15 @@ class MCPClient:
             raise MCPClientError("MCP server command is empty")
 
         mcp_cwd = self.server_path_override or "/tmp"
+        
+        log_with_context(
+            logger,
+            "DEBUG",
+            "Starting MCP client",
+            service="mcp_client",
+            mcp_server_id=self.mcp_server_id,
+            command=self.server_command[0] if self.server_command else None,
+        )
 
         params = StdioServerParameters(
             command=self.server_command[0],
@@ -101,14 +116,42 @@ class MCPClient:
             self._session = await session.__aenter__()
             await self._session.initialize()
             self._session_started = True
+            
+            log_with_context(
+                logger,
+                "INFO",
+                "MCP client started successfully",
+                service="mcp_client",
+                mcp_server_id=self.mcp_server_id,
+            )
         except Exception as e:
             await self.stop()
+            log_with_context(
+                logger,
+                "ERROR",
+                "Failed to start MCP session",
+                service="mcp_client",
+                mcp_server_id=self.mcp_server_id,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
             raise MCPClientError(f"Failed to start MCP session: {e}") from e
     
     async def call_tool(self, tool_name: str, arguments: dict) -> dict:
         """Call a tool on the MCP server."""
+        start_time = time.time()
         last_error: Optional[Exception] = None
-        for _ in range(2):
+        
+        log_with_context(
+            logger,
+            "DEBUG",
+            "Calling MCP tool",
+            service="mcp_client",
+            tool_name=tool_name,
+            mcp_server_id=self.mcp_server_id,
+        )
+        
+        for attempt in range(2):
             try:
                 if not self._session_started or not self._session:
                     await self.start()
@@ -126,14 +169,59 @@ class MCPClient:
                             content.append({"type": "text", "text": str(text)})
                 if getattr(result, "isError", False):
                     text = content[0]["text"] if content else "unknown MCP error"
+                    duration_ms = (time.time() - start_time) * 1000
+                    log_with_context(
+                        logger,
+                        "ERROR",
+                        f"MCP tool returned error: {tool_name}",
+                        service="mcp_client",
+                        tool_name=tool_name,
+                        mcp_server_id=self.mcp_server_id,
+                        duration_ms=round(duration_ms, 2),
+                        attempt=attempt + 1,
+                    )
                     raise MCPClientError(f"MCP tool '{tool_name}' returned error: {text}")
 
+                duration_ms = (time.time() - start_time) * 1000
+                log_with_context(
+                    logger,
+                    "DEBUG",
+                    "MCP tool call completed",
+                    service="mcp_client",
+                    tool_name=tool_name,
+                    mcp_server_id=self.mcp_server_id,
+                    duration_ms=round(duration_ms, 2),
+                )
                 return {"content": content}
             except Exception as e:
                 last_error = e
+                duration_ms = (time.time() - start_time) * 1000
+                log_with_context(
+                    logger,
+                    "WARNING",
+                    f"MCP tool call failed, retrying: {tool_name}",
+                    service="mcp_client",
+                    tool_name=tool_name,
+                    mcp_server_id=self.mcp_server_id,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    attempt=attempt + 1,
+                    duration_ms=round(duration_ms, 2),
+                )
                 await self.stop()
                 continue
 
+        duration_ms = (time.time() - start_time) * 1000
+        log_with_context(
+            logger,
+            "ERROR",
+            "MCP tool call failed after retries",
+            service="mcp_client",
+            tool_name=tool_name,
+            mcp_server_id=self.mcp_server_id,
+            error=str(last_error) if last_error else "Unknown error",
+            duration_ms=round(duration_ms, 2),
+        )
         raise MCPClientError(f"MCP tool call failed after retry ({tool_name}): {last_error}")
     
     async def upload_receipt_to_drive(
