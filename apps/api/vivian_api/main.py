@@ -83,14 +83,15 @@ class HTTPLoggingMiddleware:
         method = request.method
         path = request.url.path
         
-        # Get request body for POST/PUT requests (when applicable)
+        # Get request size for POST/PUT requests (when applicable) without consuming the body
         body_size = 0
-        try:
-            if request.method in ["POST", "PUT"]:
-                body = await request.body()
-                body_size = len(body)
-        except Exception:
-            pass
+        if request.method in ["POST", "PUT"]:
+            content_length = request.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    body_size = int(content_length)
+                except ValueError:
+                    body_size = 0
         
         # Process request
         response = await call_next(request)
