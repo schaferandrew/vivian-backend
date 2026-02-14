@@ -142,19 +142,15 @@ async def _http_log_sender(endpoint: str) -> None:
 def setup_logging(
     environment: str = "development",
     log_level: str = "INFO",
-    logger_endpoint: Optional[str] = None,
     enable_logging: bool = True,
 ) -> None:
-    """Initialize logging configuration.
+    """Initialize basic logging configuration (synchronous part).
     
     Args:
         environment: "development", "staging", or "production"
         log_level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        logger_endpoint: HTTP endpoint for third-party logging (staging/production)
         enable_logging: Toggle logging on/off globally
     """
-    global _http_logger_task
-    
     if not enable_logging:
         # Disable all logging
         logging.disable(logging.CRITICAL)
@@ -174,37 +170,51 @@ def setup_logging(
         console_handler.setFormatter(ConsoleFormatter())
         root_logger.addHandler(console_handler)
     else:
-        # Staging/Production: structured JSON to console, optionally to HTTP
+        # Staging/Production: structured JSON to console
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(getattr(logging, log_level.upper(), logging.INFO))
         console_handler.setFormatter(StructuredFormatter())
         root_logger.addHandler(console_handler)
-        
-        # Start HTTP logger if endpoint provided
-        if logger_endpoint and _http_logger_task is None:
-            try:
-                loop = asyncio.get_event_loop()
-                _http_logger_task = loop.create_task(_http_log_sender(logger_endpoint))
-                
-                # Add queue-based handler for HTTP logging
-                _http_handler = logging.Handler()
-                _http_handler.setLevel(getattr(logging, log_level.upper(), logging.INFO))
-                
-                def emit_http(record: LogRecord) -> None:
-                    """Emit log to queue for HTTP sender."""
-                    if not enable_logging:
-                        return
-                    msg = StructuredFormatter().format(record)
-                    try:
-                        _log_queue.put_nowait(msg)
-                    except asyncio.QueueFull:
-                        pass  # Drop log if queue is full to avoid blocking
-                
-                _http_handler.emit = emit_http
-                root_logger.addHandler(_http_handler)
-            except RuntimeError:
-                # Event loop not yet available (e.g., during import)
-                pass
+
+
+async def start_http_logging(
+    logger_endpoint: str,
+    log_level: str = "INFO",
+    enable_logging: bool = True,
+) -> None:
+    """Start async HTTP logging task (must be called after event loop is ready).
+    
+    Args:
+        logger_endpoint: HTTP endpoint for third-party logging
+        log_level: Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        enable_logging: Toggle logging on/off globally
+    """
+    global _http_logger_task
+    
+    if not enable_logging or not logger_endpoint or _http_logger_task is not None:
+        return
+    
+    # Start HTTP logger task
+    _http_logger_task = asyncio.create_task(_http_log_sender(logger_endpoint))
+    
+    # Add queue-based handler for HTTP logging
+    _http_handler = logging.Handler()
+    _http_handler.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+    
+    def emit_http(record: LogRecord) -> None:
+        """Emit log to queue for HTTP sender."""
+        if not enable_logging:
+            return
+        msg = StructuredFormatter().format(record)
+        try:
+            _log_queue.put_nowait(msg)
+        except asyncio.QueueFull:
+            pass  # Drop log if queue is full to avoid blocking
+    
+    _http_handler.emit = emit_http
+    
+    root_logger = logging.getLogger()
+    root_logger.addHandler(_http_handler)
 
 
 def get_logger(name: str) -> logging.Logger:

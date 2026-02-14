@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from vivian_api.config import Settings
-from vivian_api.logging_service import get_logger, setup_logging, log_with_context
+from vivian_api.logging_service import get_logger, setup_logging, start_http_logging, log_with_context
 from vivian_api.routers import receipts, ledger
 from vivian_api.routers import mcp, integrations, mcp_settings
 from vivian_api.chat import chat_router, history_router
@@ -32,13 +32,21 @@ async def lifespan(app: FastAPI):
     # Startup
     import os
     
-    # Initialize logging
+    # Initialize basic logging (synchronous)
     setup_logging(
         environment=settings.environment,
         log_level=settings.log_level,
-        logger_endpoint=settings.logger_endpoint,
         enable_logging=settings.enable_logging,
     )
+    
+    # Start HTTP logging if configured (async, after event loop is ready)
+    if settings.logger_endpoint:
+        await start_http_logging(
+            logger_endpoint=settings.logger_endpoint,
+            log_level=settings.log_level,
+            enable_logging=settings.enable_logging,
+        )
+    
     logger.info("Logging initialized", extra={"environment": settings.environment})
     
     os.makedirs(settings.temp_upload_dir, exist_ok=True)
