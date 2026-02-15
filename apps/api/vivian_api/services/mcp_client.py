@@ -309,6 +309,62 @@ class MCPClient:
         content = result.get("content", [{}])[0].get("text", "{}")
         return json.loads(content)
 
+    async def read_ledger_entries(
+        self,
+        year: int | None = None,
+        status_filter: str | None = None,
+        limit: int = 1000,
+        column_filters: list[dict[str, Any]] | None = None,
+    ) -> dict:
+        """Read HSA ledger entries with optional filters."""
+        payload: dict[str, Any] = {"limit": limit}
+        if year is not None:
+            payload["year"] = year
+        if status_filter:
+            payload["status_filter"] = status_filter
+        if column_filters:
+            payload["column_filters"] = column_filters
+        result = await self.call_tool("read_ledger_entries", payload)
+        content = result.get("content", [{}])[0].get("text", "{}")
+        return json.loads(content)
+
+    async def get_charitable_summary(
+        self,
+        tax_year: str | None = None,
+        column_filters: list[dict[str, Any]] | None = None,
+    ) -> dict:
+        """Get charitable summary with optional filters."""
+        payload: dict[str, Any] = {}
+        if tax_year:
+            payload["tax_year"] = tax_year
+        if column_filters:
+            payload["column_filters"] = column_filters
+        result = await self.call_tool("get_charitable_summary", payload)
+        content = result.get("content", [{}])[0].get("text", "{}")
+        return json.loads(content)
+
+    async def read_charitable_ledger_entries(
+        self,
+        tax_year: str | int | None = None,
+        organization: str | None = None,
+        tax_deductible: bool | None = None,
+        limit: int = 1000,
+        column_filters: list[dict[str, Any]] | None = None,
+    ) -> dict:
+        """Read charitable ledger entries with optional filters."""
+        payload: dict[str, Any] = {"limit": limit}
+        if tax_year is not None and str(tax_year).strip():
+            payload["tax_year"] = str(tax_year).strip()
+        if organization:
+            payload["organization"] = organization
+        if isinstance(tax_deductible, bool):
+            payload["tax_deductible"] = tax_deductible
+        if column_filters:
+            payload["column_filters"] = column_filters
+        result = await self.call_tool("read_charitable_ledger_entries", payload)
+        content = result.get("content", [{}])[0].get("text", "{}")
+        return json.loads(content)
+
     async def add_numbers(self, a: float, b: float) -> dict:
         """Call test addition MCP tool."""
         result = await self.call_tool("add_numbers", {"a": a, "b": b})

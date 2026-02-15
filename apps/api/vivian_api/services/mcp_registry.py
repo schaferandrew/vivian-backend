@@ -90,7 +90,7 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
         "hsa_ledger": MCPServerDefinition(
             id="hsa_ledger",
             name="HSA Ledger",
-            description="Drive + Sheets tools for HSA receipt workflows.",
+            description="Drive + Sheets tools for HSA receipt workflows, including filtered ledger reads.",
             command=["python", "-m", "vivian_mcp.server"],
             server_path=settings.resolve_mcp_server_path("mcp-server"),
             default_enabled=False,  # Must be configured first
@@ -114,7 +114,7 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
         "charitable_ledger": MCPServerDefinition(
             id="charitable_ledger",
             name="Charitable Ledger",
-            description="Drive + Sheets tools for charitable donation workflows.",
+            description="Drive + Sheets tools for charitable donation workflows, including filtered summaries.",
             command=["python", "-m", "vivian_mcp.server"],
             server_path=settings.resolve_mcp_server_path("mcp-server"),
             default_enabled=False,  # Must be configured first
@@ -123,6 +123,7 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
                 "append_charitable_donation_to_ledger",
                 "check_charitable_duplicates",
                 "get_charitable_summary",
+                "read_charitable_ledger_entries",
             ],
             source="builtin",
             requires_connection="google",

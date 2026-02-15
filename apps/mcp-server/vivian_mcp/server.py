@@ -138,7 +138,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="read_ledger_entries",
-            description="Read HSA ledger entries with optional filtering by year and status",
+            description="Read HSA ledger entries with optional filtering by year, status, and column predicates",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -155,6 +155,37 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Maximum number of entries to return",
                         "default": 1000
+                    },
+                    "column_filters": {
+                        "type": "array",
+                        "description": "Optional AND filters by column name. Operators: equals, not_equals, contains, starts_with, ends_with, in, gt, gte, lt, lte",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "column": {"type": "string"},
+                                "operator": {
+                                    "type": "string",
+                                    "enum": [
+                                        "equals",
+                                        "not_equals",
+                                        "contains",
+                                        "starts_with",
+                                        "ends_with",
+                                        "in",
+                                        "gt",
+                                        "gte",
+                                        "lt",
+                                        "lte",
+                                    ],
+                                    "default": "equals",
+                                },
+                                "value": {
+                                    "description": "Filter value. Use array when operator is 'in'"
+                                },
+                                "case_sensitive": {"type": "boolean", "default": False},
+                            },
+                            "required": ["column", "value"],
+                        },
                     }
                 }
             }
@@ -322,14 +353,105 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="get_charitable_summary",
-            description="Get summary of charitable donations by tax year",
+            description="Get summary of charitable donations by tax year with optional column predicates",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "tax_year": {
                         "type": "string",
                         "description": "Optional tax year to filter by (e.g., '2025')"
+                    },
+                    "column_filters": {
+                        "type": "array",
+                        "description": "Optional AND filters by column name. Operators: equals, not_equals, contains, starts_with, ends_with, in, gt, gte, lt, lte",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "column": {"type": "string"},
+                                "operator": {
+                                    "type": "string",
+                                    "enum": [
+                                        "equals",
+                                        "not_equals",
+                                        "contains",
+                                        "starts_with",
+                                        "ends_with",
+                                        "in",
+                                        "gt",
+                                        "gte",
+                                        "lt",
+                                        "lte",
+                                    ],
+                                    "default": "equals",
+                                },
+                                "value": {
+                                    "description": "Filter value. Use array when operator is 'in'"
+                                },
+                                "case_sensitive": {"type": "boolean", "default": False},
+                            },
+                            "required": ["column", "value"],
+                        },
                     }
+                }
+            }
+        ),
+        Tool(
+            name="read_charitable_ledger_entries",
+            description=(
+                "Read charitable ledger entries with optional tax year, organization, tax-deductible, "
+                "and column predicate filters"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tax_year": {
+                        "anyOf": [{"type": "string"}, {"type": "integer"}],
+                        "description": "Optional tax year filter (e.g., '2025')"
+                    },
+                    "organization": {
+                        "type": "string",
+                        "description": "Optional case-insensitive organization name contains filter"
+                    },
+                    "tax_deductible": {
+                        "type": "boolean",
+                        "description": "Optional deductible-only filter"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of entries to return",
+                        "default": 1000
+                    },
+                    "column_filters": {
+                        "type": "array",
+                        "description": "Optional AND filters by column name. Operators: equals, not_equals, contains, starts_with, ends_with, in, gt, gte, lt, lte",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "column": {"type": "string"},
+                                "operator": {
+                                    "type": "string",
+                                    "enum": [
+                                        "equals",
+                                        "not_equals",
+                                        "contains",
+                                        "starts_with",
+                                        "ends_with",
+                                        "in",
+                                        "gt",
+                                        "gte",
+                                        "lt",
+                                        "lte",
+                                    ],
+                                    "default": "equals",
+                                },
+                                "value": {
+                                    "description": "Filter value. Use array when operator is 'in'"
+                                },
+                                "case_sensitive": {"type": "boolean", "default": False},
+                            },
+                            "required": ["column", "value"],
+                        },
+                    },
                 }
             }
         ),
@@ -377,7 +499,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             result = await hsa_tools.read_ledger_entries(
                 year=arguments.get("year"),
                 status_filter=arguments.get("status_filter"),
-                limit=arguments.get("limit", 1000)
+                limit=arguments.get("limit", 1000),
+                column_filters=arguments.get("column_filters"),
             )
             return [TextContent(type="text", text=result)]
 
@@ -432,7 +555,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         elif name == "get_charitable_summary":
             result = await charitable_tools.get_donation_summary(
-                arguments.get("tax_year")
+                arguments.get("tax_year"),
+                arguments.get("column_filters"),
+            )
+            return [TextContent(type="text", text=result)]
+
+        elif name == "read_charitable_ledger_entries":
+            result = await charitable_tools.read_donation_entries(
+                tax_year=arguments.get("tax_year"),
+                organization=arguments.get("organization"),
+                tax_deductible=arguments.get("tax_deductible"),
+                limit=arguments.get("limit", 1000),
+                column_filters=arguments.get("column_filters"),
             )
             return [TextContent(type="text", text=result)]
 
