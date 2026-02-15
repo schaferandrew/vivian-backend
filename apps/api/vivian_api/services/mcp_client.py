@@ -1,5 +1,7 @@
 """MCP client service for communicating with MCP server."""
 
+from __future__ import annotations
+
 import json
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Optional
@@ -13,9 +15,54 @@ class MCPClientError(Exception):
     """Raised when MCP communication fails."""
 
 
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    """Best-effort parse of a JSON object string."""
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def extract_tool_result_text(result: dict[str, Any]) -> str:
+    """Extract text payload from an MCP call_tool response."""
+    content = result.get("content")
+    if not isinstance(content, list) or not content:
+        return "{}"
+
+    first = content[0]
+    if not isinstance(first, dict):
+        return "{}"
+
+    text = first.get("text")
+    if isinstance(text, str):
+        return text
+    return str(text) if text is not None else "{}"
+
+
+def extract_tool_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract structured payload from MCP response with text JSON fallback."""
+    structured = result.get("structured_content")
+    if structured is None:
+        structured = result.get("structuredContent")
+
+    if hasattr(structured, "model_dump"):
+        structured = structured.model_dump()  # type: ignore[assignment]
+
+    if isinstance(structured, dict):
+        return structured
+
+    if isinstance(structured, str):
+        parsed = _parse_json_object(structured)
+        if parsed is not None:
+            return parsed
+
+    return _parse_json_object(extract_tool_result_text(result))
+
+
 class MCPClient:
     """Client for communicating with MCP server via stdio."""
-    
+
     def __init__(
         self,
         server_command: list[str],
@@ -30,7 +77,7 @@ class MCPClient:
         self._session: Optional[ClientSession] = None
         self._stdio_cm: Optional[AbstractAsyncContextManager] = None
         self._session_started = False
-    
+
     @classmethod
     async def from_db(
         cls,
@@ -41,33 +88,33 @@ class MCPClient:
         server_path_override: Optional[str] = None,
     ) -> "MCPClient":
         """Create an MCPClient with database-backed configuration.
-        
+
         This factory method loads Google connection tokens and MCP settings
         from the database and builds the environment for the subprocess.
-        
+
         Args:
             server_command: The MCP server command to run
             home_id: The home ID to load configuration for
             mcp_server_id: The MCP server ID to load settings for
             db: Database session
             server_path_override: Optional path override for server CWD
-            
+
         Returns:
             Configured MCPClient instance
         """
         from vivian_api.config import Settings
         from vivian_api.services.google_integration import build_mcp_env_from_db
-        
+
         settings = Settings()
         env = await build_mcp_env_from_db(home_id, mcp_server_id, db, settings)
-        
+
         return cls(
             server_command=server_command,
             process_env=env,
             server_path_override=server_path_override,
             mcp_server_id=mcp_server_id,
         )
-    
+
     async def start(self):
         """Start the MCP server process."""
         if self._session_started and self._session:
@@ -104,8 +151,15 @@ class MCPClient:
         except Exception as e:
             await self.stop()
             raise MCPClientError(f"Failed to start MCP session: {e}") from e
-    
-    async def call_tool(self, tool_name: str, arguments: dict) -> dict:
+
+    def _parse_tool_payload(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Return normalized tool payload with empty-object fallback."""
+        payload = extract_tool_result_payload(result)
+        if isinstance(payload, dict):
+            return payload
+        return {}
+
+    async def call_tool(self, tool_name: str, arguments: dict) -> dict[str, Any]:
         """Call a tool on the MCP server."""
         last_error: Optional[Exception] = None
         for _ in range(2):
@@ -117,28 +171,40 @@ class MCPClient:
 
                 result = await self._session.call_tool(tool_name, arguments or {})
                 content: list[dict[str, Any]] = []
-                for part in result.content:
+                for part in getattr(result, "content", []):
                     if isinstance(part, TextContent):
                         content.append({"type": "text", "text": part.text})
-                    else:
-                        text = getattr(part, "text", None)
-                        if text is not None:
-                            content.append({"type": "text", "text": str(text)})
-                if getattr(result, "isError", False):
-                    text = content[0]["text"] if content else "unknown MCP error"
-                    raise MCPClientError(f"MCP tool '{tool_name}' returned error: {text}")
+                        continue
 
-                return {"content": content}
+                    text = getattr(part, "text", None)
+                    if text is not None:
+                        content.append({"type": "text", "text": str(text)})
+
+                structured_content = getattr(result, "structuredContent", None)
+                normalized_result = {
+                    "content": content,
+                    "structured_content": structured_content,
+                }
+
+                if getattr(result, "isError", False):
+                    payload = extract_tool_result_payload(normalized_result)
+                    if isinstance(payload, dict) and payload.get("error"):
+                        error_text = str(payload.get("error"))
+                    else:
+                        error_text = extract_tool_result_text(normalized_result)
+                    raise MCPClientError(f"MCP tool '{tool_name}' returned error: {error_text}")
+
+                return normalized_result
             except Exception as e:
                 last_error = e
                 await self.stop()
                 continue
 
         raise MCPClientError(f"MCP tool call failed after retry ({tool_name}): {last_error}")
-    
+
     async def upload_receipt_to_drive(
-        self, 
-        local_file_path: str, 
+        self,
+        local_file_path: str,
         status: str,
         filename: Optional[str] = None
     ) -> dict:
@@ -152,11 +218,8 @@ class MCPClient:
             payload["filename"] = filename
 
         result = await self.call_tool("upload_receipt_to_drive", payload)
-        
-        # Parse the text content from MCP response
-        content = result.get("content", [{}])[0].get("text", "{}")
-        return json.loads(content)
-    
+        return self._parse_tool_payload(result)
+
     async def append_to_ledger(
         self,
         expense_json: dict,
@@ -178,9 +241,7 @@ class MCPClient:
             payload["force_append"] = True
 
         result = await self.call_tool("append_expense_to_ledger", payload)
-        
-        content = result.get("content", [{}])[0].get("text", "{}")
-        return json.loads(content)
+        return self._parse_tool_payload(result)
 
     async def upload_charitable_receipt_to_drive(
         self,
@@ -198,8 +259,7 @@ class MCPClient:
             payload["filename"] = filename
 
         result = await self.call_tool("upload_charitable_receipt_to_drive", payload)
-        content = result.get("content", [{}])[0].get("text", "{}")
-        return json.loads(content)
+        return self._parse_tool_payload(result)
 
     async def append_charitable_donation_to_ledger(
         self,
@@ -216,20 +276,19 @@ class MCPClient:
             payload["force_append"] = True
 
         result = await self.call_tool("append_charitable_donation_to_ledger", payload)
-        content = result.get("content", [{}])[0].get("text", "{}")
-        return json.loads(content)
-    
+        return self._parse_tool_payload(result)
+
     async def check_for_duplicates(
         self,
         expense_json: dict,
         fuzzy_days: int = 3
     ) -> dict:
         """Check for duplicate entries in the ledger.
-        
+
         Args:
             expense_json: Expense data with provider, service_date, amount
             fuzzy_days: Number of days to allow for fuzzy date matching
-            
+
         Returns:
             Dict with is_duplicate, potential_duplicates, recommendation
         """
@@ -238,9 +297,7 @@ class MCPClient:
         if fuzzy_days != 3:
             payload["fuzzy_days"] = fuzzy_days
         result = await self.call_tool("check_for_duplicates", payload)
-        
-        content = result.get("content", [{}])[0].get("text", "{}")
-        return json.loads(content)
+        return self._parse_tool_payload(result)
 
     async def check_charitable_duplicates(
         self,
@@ -260,9 +317,7 @@ class MCPClient:
         if fuzzy_days != 3:
             payload["fuzzy_days"] = fuzzy_days
         result = await self.call_tool("check_charitable_duplicates", payload)
-
-        content = result.get("content", [{}])[0].get("text", "{}")
-        return json.loads(content)
+        return self._parse_tool_payload(result)
 
     async def bulk_import_receipts(
         self,
@@ -282,9 +337,8 @@ class MCPClient:
             payload["fuzzy_days"] = fuzzy_days
 
         result = await self.call_tool("bulk_import_receipts", payload)
-        content = result.get("content", [{}])[0].get("text", "{}")
-        return json.loads(content)
-    
+        return self._parse_tool_payload(result)
+
     async def update_expense_status(
         self,
         expense_id: str,
@@ -298,16 +352,14 @@ class MCPClient:
         }
         if reimbursement_date:
             params["reimbursement_date"] = reimbursement_date
-        
+
         result = await self.call_tool("update_expense_status", params)
-        content = result.get("content", [{}])[0].get("text", "{}")
-        return json.loads(content)
-    
+        return self._parse_tool_payload(result)
+
     async def get_unreimbursed_balance(self) -> dict:
         """Get unreimbursed balance."""
         result = await self.call_tool("get_unreimbursed_balance", {})
-        content = result.get("content", [{}])[0].get("text", "{}")
-        return json.loads(content)
+        return self._parse_tool_payload(result)
 
     async def read_ledger_entries(
         self,
@@ -325,8 +377,7 @@ class MCPClient:
         if column_filters:
             payload["column_filters"] = column_filters
         result = await self.call_tool("read_ledger_entries", payload)
-        content = result.get("content", [{}])[0].get("text", "{}")
-        return json.loads(content)
+        return self._parse_tool_payload(result)
 
     async def get_charitable_summary(
         self,
@@ -340,8 +391,7 @@ class MCPClient:
         if column_filters:
             payload["column_filters"] = column_filters
         result = await self.call_tool("get_charitable_summary", payload)
-        content = result.get("content", [{}])[0].get("text", "{}")
-        return json.loads(content)
+        return self._parse_tool_payload(result)
 
     async def read_charitable_ledger_entries(
         self,
@@ -362,15 +412,13 @@ class MCPClient:
         if column_filters:
             payload["column_filters"] = column_filters
         result = await self.call_tool("read_charitable_ledger_entries", payload)
-        content = result.get("content", [{}])[0].get("text", "{}")
-        return json.loads(content)
+        return self._parse_tool_payload(result)
 
     async def add_numbers(self, a: float, b: float) -> dict:
         """Call test addition MCP tool."""
         result = await self.call_tool("add_numbers", {"a": a, "b": b})
-        content = result.get("content", [{}])[0].get("text", "{}")
-        return json.loads(content)
-    
+        return self._parse_tool_payload(result)
+
     async def stop(self):
         """Stop the MCP server process."""
         if self._session:

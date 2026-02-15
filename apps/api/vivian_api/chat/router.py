@@ -44,8 +44,14 @@ from vivian_api.auth.dependencies import CurrentUserContext, get_current_user_co
 from vivian_api.db.database import get_db
 from vivian_api.repositories.connection_repository import McpServerSettingsRepository
 from vivian_api.repositories import ChatMessageRepository, ChatRepository
-from vivian_api.services.mcp_client import MCPClient, MCPClientError
+from vivian_api.services.mcp_client import (
+    MCPClient,
+    MCPClientError,
+    extract_tool_result_payload,
+    extract_tool_result_text,
+)
 from vivian_api.services.mcp_registry import get_mcp_server_definitions, normalize_enabled_server_ids
+from vivian_mcp.contracts import build_model_tool_specs
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -80,203 +86,7 @@ SUMMARY_MODEL_ID = "google/gemini-3-flash-preview"
 SUMMARY_REFINEMENT_MIN_MESSAGES = 4
 MAX_MODEL_TOOL_ROUNDS = 4
 
-MODEL_MCP_TOOL_SPECS: dict[str, dict[str, Any]] = {
-    "get_unreimbursed_balance": {
-        "server_id": "hsa_ledger",
-        "description": "Return the current total unreimbursed HSA amount and count of unreimbursed expenses.",
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-        },
-    },
-    "read_ledger_entries": {
-        "server_id": "hsa_ledger",
-        "description": (
-            "Read HSA ledger entries with optional year/status filters and AND-based column predicates. "
-            "Use this for summaries and transaction breakdowns."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "year": {"type": "integer", "description": "Optional calendar year, for example 2026."},
-                "status_filter": {
-                    "type": "string",
-                    "enum": ["reimbursed", "unreimbursed", "not_hsa_eligible"],
-                    "description": "Optional reimbursement status filter.",
-                },
-                "limit": {"type": "integer", "description": "Maximum rows to read (default 1000)."},
-                "column_filters": {
-                    "type": "array",
-                    "description": (
-                        "Optional AND filters by column. Operators: equals, not_equals, contains, "
-                        "starts_with, ends_with, in, gt, gte, lt, lte."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "column": {"type": "string"},
-                            "operator": {
-                                "type": "string",
-                                "enum": [
-                                    "equals",
-                                    "not_equals",
-                                    "contains",
-                                    "starts_with",
-                                    "ends_with",
-                                    "in",
-                                    "gt",
-                                    "gte",
-                                    "lt",
-                                    "lte",
-                                ],
-                                "default": "equals",
-                            },
-                            "value": {
-                                "anyOf": [
-                                    {"type": "string"},
-                                    {"type": "number"},
-                                    {"type": "boolean"},
-                                    {"type": "array", "items": {"type": "string"}},
-                                    {"type": "array", "items": {"type": "number"}},
-                                ]
-                            },
-                            "case_sensitive": {"type": "boolean", "default": False},
-                        },
-                        "required": ["column", "value"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "additionalProperties": False,
-        },
-    },
-    "get_charitable_summary": {
-        "server_id": "charitable_ledger",
-        "description": (
-            "Return charitable donation totals and organization breakdowns, optionally scoped by tax year "
-            "and column predicates. Prefer this for fast totals."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "tax_year": {
-                    "anyOf": [{"type": "string"}, {"type": "integer"}],
-                    "description": "Optional tax year, for example 2026.",
-                },
-                "column_filters": {
-                    "type": "array",
-                    "description": (
-                        "Optional AND filters by column. Operators: equals, not_equals, contains, "
-                        "starts_with, ends_with, in, gt, gte, lt, lte."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "column": {"type": "string"},
-                            "operator": {
-                                "type": "string",
-                                "enum": [
-                                    "equals",
-                                    "not_equals",
-                                    "contains",
-                                    "starts_with",
-                                    "ends_with",
-                                    "in",
-                                    "gt",
-                                    "gte",
-                                    "lt",
-                                    "lte",
-                                ],
-                                "default": "equals",
-                            },
-                            "value": {
-                                "anyOf": [
-                                    {"type": "string"},
-                                    {"type": "number"},
-                                    {"type": "boolean"},
-                                    {"type": "array", "items": {"type": "string"}},
-                                    {"type": "array", "items": {"type": "number"}},
-                                ]
-                            },
-                            "case_sensitive": {"type": "boolean", "default": False},
-                        },
-                        "required": ["column", "value"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "additionalProperties": False,
-        },
-    },
-    "read_charitable_ledger_entries": {
-        "server_id": "charitable_ledger",
-        "description": (
-            "Read charitable ledger entries with optional tax-year, organization, tax-deductible, and "
-            "column-level filters. Use this for filtered lists and detailed breakdowns."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "tax_year": {
-                    "anyOf": [{"type": "string"}, {"type": "integer"}],
-                    "description": "Optional tax year, for example 2026.",
-                },
-                "organization": {
-                    "type": "string",
-                    "description": "Optional case-insensitive organization name contains filter.",
-                },
-                "tax_deductible": {
-                    "type": "boolean",
-                    "description": "Optional deductible-only filter.",
-                },
-                "limit": {"type": "integer", "description": "Maximum rows to read (default 1000)."},
-                "column_filters": {
-                    "type": "array",
-                    "description": (
-                        "Optional AND filters by column. Operators: equals, not_equals, contains, "
-                        "starts_with, ends_with, in, gt, gte, lt, lte."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "column": {"type": "string"},
-                            "operator": {
-                                "type": "string",
-                                "enum": [
-                                    "equals",
-                                    "not_equals",
-                                    "contains",
-                                    "starts_with",
-                                    "ends_with",
-                                    "in",
-                                    "gt",
-                                    "gte",
-                                    "lt",
-                                    "lte",
-                                ],
-                                "default": "equals",
-                            },
-                            "value": {
-                                "anyOf": [
-                                    {"type": "string"},
-                                    {"type": "number"},
-                                    {"type": "boolean"},
-                                    {"type": "array", "items": {"type": "string"}},
-                                    {"type": "array", "items": {"type": "number"}},
-                                ]
-                            },
-                            "case_sensitive": {"type": "boolean", "default": False},
-                        },
-                        "required": ["column", "value"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "additionalProperties": False,
-        },
-    },
-}
+MODEL_MCP_TOOL_SPECS: dict[str, dict[str, Any]] = build_model_tool_specs()
 
 
 def _normalize_title(raw: str, fallback: str) -> str:
@@ -586,16 +396,10 @@ def _build_model_tool_schema(enabled_servers: list[str]) -> list[dict[str, Any]]
 
 def _extract_mcp_result_text(result: dict[str, Any]) -> str:
     """Extract text payload from an MCP call_tool response."""
-    content = result.get("content")
-    if not isinstance(content, list) or not content:
-        return "{}"
-    first = content[0]
-    if not isinstance(first, dict):
-        return "{}"
-    text = first.get("text")
-    if isinstance(text, str):
-        return text
-    return str(text) if text is not None else "{}"
+    payload = extract_tool_result_payload(result)
+    if isinstance(payload, dict):
+        return _compact_json(payload)
+    return extract_tool_result_text(result)
 
 
 def _coerce_model_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1089,8 +893,9 @@ async def _try_dual_summary_tool_response(
             if tax_year:
                 hsa_args["year"] = int(tax_year)
             hsa_result = await hsa_client.call_tool("read_ledger_entries", hsa_args)
-            hsa_text = hsa_result.get("content", [{}])[0].get("text", "{}")
-            hsa_data = json.loads(hsa_text)
+            hsa_data = extract_tool_result_payload(hsa_result) or {}
+            if not isinstance(hsa_data, dict):
+                hsa_data = {}
             tools_called.append(
                 {
                     "server_id": "hsa_ledger",
@@ -1119,8 +924,9 @@ async def _try_dual_summary_tool_response(
         try:
             charitable_args = {"tax_year": tax_year} if tax_year else {}
             charitable_result = await charitable_client.call_tool("get_charitable_summary", charitable_args)
-            charitable_text = charitable_result.get("content", [{}])[0].get("text", "{}")
-            charitable_data = json.loads(charitable_text)
+            charitable_data = extract_tool_result_payload(charitable_result) or {}
+            if not isinstance(charitable_data, dict):
+                charitable_data = {}
             tools_called.append(
                 {
                     "server_id": "charitable_ledger",
@@ -1255,8 +1061,9 @@ async def _try_balance_tool_response(
                 "read_ledger_entries",
                 {"limit": 1000},
             )
-            details_text = details_payload.get("content", [{}])[0].get("text", "{}")
-            details_data = json.loads(details_text)
+            details_data = extract_tool_result_payload(details_payload) or {}
+            if not isinstance(details_data, dict):
+                details_data = {}
             if not details_data.get("success"):
                 error = str(details_data.get("error", "unknown error"))
                 return (
@@ -1290,8 +1097,9 @@ async def _try_balance_tool_response(
                 "read_ledger_entries",
                 {"status_filter": "unreimbursed", "limit": 1000},
             )
-            details_text = details_payload.get("content", [{}])[0].get("text", "{}")
-            details_data = json.loads(details_text)
+            details_data = extract_tool_result_payload(details_payload) or {}
+            if not isinstance(details_data, dict):
+                details_data = {}
             if not details_data.get("success"):
                 error = str(details_data.get("error", "unknown error"))
                 return (
@@ -1412,8 +1220,9 @@ async def _try_charitable_tool_response(
     try:
         arguments = {"tax_year": tax_year} if tax_year else {}
         result = await mcp_client.call_tool("get_charitable_summary", arguments)
-        content = result.get("content", [{}])[0].get("text", "{}")
-        summary_data = json.loads(content)
+        summary_data = extract_tool_result_payload(result) or {}
+        if not isinstance(summary_data, dict):
+            summary_data = {}
         if not summary_data.get("success"):
             error = str(summary_data.get("error", "unknown error"))
             return (

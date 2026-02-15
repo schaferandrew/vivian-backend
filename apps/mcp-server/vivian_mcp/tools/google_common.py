@@ -10,6 +10,170 @@ from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 
 
+SUPPORTED_FILTER_OPERATORS = {
+    "equals",
+    "not_equals",
+    "contains",
+    "starts_with",
+    "ends_with",
+    "in",
+    "gt",
+    "gte",
+    "lt",
+    "lte",
+}
+
+
+def _normalize_for_compare(value: Any, case_sensitive: bool) -> str:
+    """Normalize value to string for case-aware comparisons."""
+    text = str(value if value is not None else "")
+    return text if case_sensitive else text.lower()
+
+
+def _coerce_float(value: Any) -> float | None:
+    """Coerce value to float when possible."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _matches_filter(cell_value: Any, column_filter: dict[str, Any]) -> bool:
+    """Evaluate one row cell against one column filter."""
+    operator = str(column_filter.get("operator") or "equals")
+    expected = column_filter.get("value")
+    case_sensitive = bool(column_filter.get("case_sensitive", False))
+
+    if operator not in SUPPORTED_FILTER_OPERATORS:
+        return False
+
+    actual_text = _normalize_for_compare(cell_value, case_sensitive)
+
+    if operator == "equals":
+        return actual_text == _normalize_for_compare(expected, case_sensitive)
+
+    if operator == "not_equals":
+        return actual_text != _normalize_for_compare(expected, case_sensitive)
+
+    if operator == "contains":
+        return _normalize_for_compare(expected, case_sensitive) in actual_text
+
+    if operator == "starts_with":
+        return actual_text.startswith(_normalize_for_compare(expected, case_sensitive))
+
+    if operator == "ends_with":
+        return actual_text.endswith(_normalize_for_compare(expected, case_sensitive))
+
+    if operator == "in":
+        if not isinstance(expected, list):
+            return False
+        normalized_values = {
+            _normalize_for_compare(item, case_sensitive)
+            for item in expected
+        }
+        return actual_text in normalized_values
+
+    # Numeric comparators
+    actual_num = _coerce_float(cell_value)
+    expected_num = _coerce_float(expected)
+    if actual_num is None or expected_num is None:
+        return False
+
+    if operator == "gt":
+        return actual_num > expected_num
+    if operator == "gte":
+        return actual_num >= expected_num
+    if operator == "lt":
+        return actual_num < expected_num
+    if operator == "lte":
+        return actual_num <= expected_num
+
+    return False
+
+
+def apply_column_filters(
+    *,
+    headers: list[Any],
+    rows: list[list[Any]],
+    column_filters: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Apply ANDed column filters to worksheet rows.
+
+    Returns:
+        {"success": True, "rows": [...]} on success
+        {"success": False, "error": "...", "available_columns": [...]} on invalid filters
+    """
+    if not column_filters:
+        return {"success": True, "rows": rows}
+
+    if not headers:
+        return {"success": False, "error": "No headers available for column filtering", "available_columns": []}
+
+    header_map = {
+        str(header).strip().lower(): idx
+        for idx, header in enumerate(headers)
+    }
+    available_columns = sorted(header_map.keys())
+
+    normalized_filters: list[tuple[int, dict[str, Any]]] = []
+    for raw_filter in column_filters:
+        if not isinstance(raw_filter, dict):
+            return {
+                "success": False,
+                "error": "Each column filter must be an object",
+                "available_columns": available_columns,
+            }
+
+        column_name = str(raw_filter.get("column") or "").strip().lower()
+        if not column_name:
+            return {
+                "success": False,
+                "error": "Each column filter requires a non-empty 'column' field",
+                "available_columns": available_columns,
+            }
+        if column_name not in header_map:
+            return {
+                "success": False,
+                "error": f"Unknown column '{column_name}'",
+                "available_columns": available_columns,
+            }
+
+        operator = str(raw_filter.get("operator") or "equals")
+        if operator not in SUPPORTED_FILTER_OPERATORS:
+            return {
+                "success": False,
+                "error": (
+                    f"Unsupported operator '{operator}'. "
+                    f"Supported operators: {', '.join(sorted(SUPPORTED_FILTER_OPERATORS))}"
+                ),
+                "available_columns": available_columns,
+            }
+
+        if "value" not in raw_filter:
+            return {
+                "success": False,
+                "error": "Each column filter requires a 'value' field",
+                "available_columns": available_columns,
+            }
+
+        normalized_filter = dict(raw_filter)
+        normalized_filter["operator"] = operator
+        normalized_filters.append((header_map[column_name], normalized_filter))
+
+    filtered_rows: list[list[Any]] = []
+    for row in rows:
+        include_row = True
+        for column_index, column_filter in normalized_filters:
+            cell_value = row[column_index] if column_index < len(row) else ""
+            if not _matches_filter(cell_value, column_filter):
+                include_row = False
+                break
+        if include_row:
+            filtered_rows.append(row)
+
+    return {"success": True, "rows": filtered_rows}
+
+
 class GoogleServiceMixin:
     """Mixin providing shared Google service initialization."""
     

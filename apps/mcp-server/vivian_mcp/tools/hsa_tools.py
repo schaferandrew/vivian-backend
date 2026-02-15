@@ -13,6 +13,7 @@ from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 
 from vivian_mcp.config import Settings
+from vivian_mcp.tools.google_common import apply_column_filters
 
 try:
     from vivian_shared.helpers import (
@@ -960,7 +961,8 @@ class HSAToolManager:
         self,
         year: Optional[int] = None,
         status_filter: Optional[str] = None,
-        limit: int = 1000
+        limit: int = 1000,
+        column_filters: list[dict[str, Any]] | None = None,
     ) -> str:
         """Read entries from the HSA ledger with optional filtering.
         
@@ -999,6 +1001,21 @@ class HSAToolManager:
             
             headers = rows[0] if rows else []
             data_rows = rows[1:]
+
+            filter_result = apply_column_filters(
+                headers=headers,
+                rows=data_rows,
+                column_filters=column_filters,
+            )
+            if not filter_result.get("success"):
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": filter_result.get("error", "Invalid column filters"),
+                        "available_columns": filter_result.get("available_columns", []),
+                    }
+                )
+            data_rows = filter_result.get("rows", data_rows)
             
             # Map column indices (based on EXPECTED_HEADERS)
             col_map = {
