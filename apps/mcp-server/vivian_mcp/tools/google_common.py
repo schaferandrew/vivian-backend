@@ -11,20 +11,22 @@ from google.oauth2.credentials import Credentials
 
 
 def _normalize_filter_operator(raw_operator: Any) -> str:
+    """Normalize operator aliases to canonical names."""
     operator = str(raw_operator or "").strip().lower()
     aliases = {
         "eq": "equals",
         "==": "equals",
         "neq": "not_equals",
         "!=": "not_equals",
-        "gte": "greater_than_or_equal",
-        ">=": "greater_than_or_equal",
-        "lte": "less_than_or_equal",
-        "<=": "less_than_or_equal",
+        "in_list": "in",
         "gt": "greater_than",
         ">": "greater_than",
+        "gte": "greater_than_or_equal",
+        ">=": "greater_than_or_equal",
         "lt": "less_than",
         "<": "less_than",
+        "lte": "less_than_or_equal",
+        "<=": "less_than_or_equal",
     }
     return aliases.get(operator, operator)
 
@@ -36,12 +38,29 @@ def _coerce_number(value: Any) -> float | None:
         return None
 
 
-def _matches_column_filter(cell_value: Any, operator: str, expected_value: Any, case_sensitive: bool) -> bool:
-    text_value = "" if cell_value is None else str(cell_value)
-    expected_text = "" if expected_value is None else str(expected_value)
+def _normalize_for_compare(value: Any, case_sensitive: bool) -> str:
+    text = str(value if value is not None else "")
+    return text if case_sensitive else text.lower()
 
-    lhs = text_value if case_sensitive else text_value.lower()
-    rhs = expected_text if case_sensitive else expected_text.lower()
+
+SUPPORTED_FILTER_OPERATORS = {
+    "equals",
+    "not_equals",
+    "contains",
+    "not_contains",
+    "starts_with",
+    "ends_with",
+    "in",
+    "greater_than",
+    "greater_than_or_equal",
+    "less_than",
+    "less_than_or_equal",
+}
+
+
+def _matches_column_filter(cell_value: Any, operator: str, expected_value: Any, case_sensitive: bool) -> bool:
+    lhs = _normalize_for_compare(cell_value, case_sensitive)
+    rhs = _normalize_for_compare(expected_value, case_sensitive)
 
     if operator == "equals":
         return lhs == rhs
@@ -55,6 +74,11 @@ def _matches_column_filter(cell_value: Any, operator: str, expected_value: Any, 
         return lhs.startswith(rhs)
     if operator == "ends_with":
         return lhs.endswith(rhs)
+    if operator == "in":
+        if not isinstance(expected_value, list):
+            return False
+        normalized_values = {_normalize_for_compare(item, case_sensitive) for item in expected_value}
+        return lhs in normalized_values
     if operator in {"greater_than", "greater_than_or_equal", "less_than", "less_than_or_equal"}:
         lhs_num = _coerce_number(cell_value)
         rhs_num = _coerce_number(expected_value)
@@ -80,54 +104,52 @@ def apply_column_filters(
     if not column_filters:
         return {"success": True, "rows": rows}
 
+    if not headers:
+        return {"success": False, "error": "No headers available for column filtering", "available_columns": []}
+
     normalized_headers = [str(h).strip() for h in headers]
     header_index = {header.lower(): idx for idx, header in enumerate(normalized_headers)}
     available_columns = sorted(normalized_headers)
 
     compiled_filters: list[tuple[int, str, Any, bool]] = []
-    supported = {
-        "equals",
-        "not_equals",
-        "contains",
-        "not_contains",
-        "starts_with",
-        "ends_with",
-        "greater_than",
-        "greater_than_or_equal",
-        "less_than",
-        "less_than_or_equal",
-    }
 
     for filt in column_filters:
         if not isinstance(filt, dict):
             return {
                 "success": False,
-                "error": "Each column filter must be an object.",
+                "error": "Each column filter must be an object",
                 "available_columns": available_columns,
             }
         column = str(filt.get("column") or "").strip()
         if not column:
             return {
                 "success": False,
-                "error": "Each column filter requires a non-empty 'column'.",
+                "error": "Each column filter requires a non-empty 'column' field",
                 "available_columns": available_columns,
             }
         idx = header_index.get(column.lower())
         if idx is None:
             return {
                 "success": False,
-                "error": f"Unknown column '{column}'.",
+                "error": f"Unknown column '{column}'",
                 "available_columns": available_columns,
             }
 
         operator = _normalize_filter_operator(filt.get("operator", "equals"))
-        if operator not in supported:
+        if operator not in SUPPORTED_FILTER_OPERATORS:
             return {
                 "success": False,
                 "error": (
-                    "Unsupported operator "
-                    f"'{filt.get('operator')}'. Supported operators: {', '.join(sorted(supported))}."
+                    f"Unsupported operator '{filt.get('operator')}'. "
+                    f"Supported operators: {', '.join(sorted(SUPPORTED_FILTER_OPERATORS))}"
                 ),
+                "available_columns": available_columns,
+            }
+
+        if "value" not in filt:
+            return {
+                "success": False,
+                "error": "Each column filter requires a 'value' field",
                 "available_columns": available_columns,
             }
 
