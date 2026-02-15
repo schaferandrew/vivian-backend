@@ -25,6 +25,7 @@ router = APIRouter(
     dependencies=[Depends(get_current_user_context)],
 )
 logger = logging.getLogger(__name__)
+ENABLED_SERVERS_PREFS_KEY = "__enabled_servers__"
 
 
 class MCPServerSettingsSchema(BaseModel):
@@ -123,6 +124,25 @@ def _is_owner(current_user: CurrentUserContext) -> bool:
     return any(m.role == "owner" for m in current_user.memberships)
 
 
+def _get_enabled_server_ids_for_home(
+    *,
+    home_id: str,
+    db: Session,
+    settings: Settings,
+) -> list[str]:
+    """Load persisted enabled MCP servers for the home with legacy fallback."""
+    settings_repo = McpServerSettingsRepository(db)
+    prefs = settings_repo.get_by_home_and_server(home_id, ENABLED_SERVERS_PREFS_KEY)
+    if prefs:
+        raw_ids = prefs.settings_json.get("enabled_server_ids")
+        if isinstance(raw_ids, list):
+            requested_ids = [str(server_id) for server_id in raw_ids]
+            return normalize_enabled_server_ids(requested_ids, settings)
+
+    # Legacy process-level fallback to avoid abrupt behavior change for existing installs.
+    return normalize_enabled_server_ids(get_enabled_mcp_servers(), settings)
+
+
 @router.get("/servers", response_model=MCPServersResponse)
 async def list_mcp_servers(
     current_user: CurrentUserContext = Depends(get_current_user_context),
@@ -131,11 +151,10 @@ async def list_mcp_servers(
     """List available MCP servers with current settings for user's home."""
     settings = Settings()
     definitions = get_mcp_server_definitions(settings)
-    enabled_ids = normalize_enabled_server_ids(get_enabled_mcp_servers(), settings)
-    enabled_lookup = set(enabled_ids)
-    
-    # Get user's home settings
+    # Get user's home settings and persisted enabled server defaults.
     home_id = _get_default_home_id(current_user)
+    enabled_ids = _get_enabled_server_ids_for_home(home_id=home_id, db=db, settings=settings)
+    enabled_lookup = set(enabled_ids)
     settings_repo = McpServerSettingsRepository(db)
     is_editable = _is_owner(current_user)
     
@@ -218,7 +237,7 @@ async def get_mcp_server_settings(
     )
 
 
-@router.put("/servers/{server_id}/settings", response_model=MCPSettingsUpdateResponse)
+@router.patch("/servers/{server_id}/settings", response_model=MCPSettingsUpdateResponse)
 async def update_mcp_server_settings(
     server_id: str,
     request: MCPSettingsUpdateRequest,
@@ -265,12 +284,29 @@ async def update_mcp_server_settings(
 @router.post("/servers/enabled", response_model=MCPEnabledUpdateResponse)
 async def update_enabled_mcp_servers(
     request: MCPEnabledUpdateRequest,
-    _current_user: CurrentUserContext = Depends(require_roles("owner", "parent")),
+    current_user: CurrentUserContext = Depends(require_roles("owner", "parent")),
+    db: Session = Depends(get_db),
 ):
-    """Update globally enabled MCP server IDs."""
+    """Update persisted enabled MCP server IDs for the user's default home."""
     settings = Settings()
     normalized_ids = normalize_enabled_server_ids(request.enabled_server_ids, settings)
+
+    home_id = _get_default_home_id(current_user)
+    settings_repo = McpServerSettingsRepository(db)
+    prefs = settings_repo.get_or_create(home_id, ENABLED_SERVERS_PREFS_KEY)
+    settings_repo.update(
+        prefs,
+        {"enabled_server_ids": normalized_ids},
+    )
+
+    # Keep legacy process-level setting in sync for compatibility.
     set_enabled_mcp_servers(normalized_ids)
+
+    logger.warning(
+        "Updated enabled MCP servers for home_id=%s enabled=%s",
+        home_id,
+        normalized_ids,
+    )
     return MCPEnabledUpdateResponse(enabled_server_ids=normalized_ids)
 
 
