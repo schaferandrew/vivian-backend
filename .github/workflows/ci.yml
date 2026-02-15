@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Python Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run API tests
+        env:
+          VIVIAN_API_ENCRYPTION_KEY: fEoEtwTZrNYkNLpLM2XXnV1l3e4dnKYGZHso5N86c10=
+        run: |
+          uv sync --project apps/api --extra test --locked
+          uv run --project apps/api --extra test pytest apps/api/tests
+
+      - name: Run test MCP server tests
+        run: |
+          uv sync --project apps/test-mcp-server --extra test --locked
+          uv run --project apps/test-mcp-server --extra test pytest apps/test-mcp-server/tests
+
+  build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build API image
+        run: docker build --file apps/api/Dockerfile --tag vivian-api:ci .

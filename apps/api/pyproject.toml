@@ -16,6 +16,13 @@ dependencies = [
     "psycopg2-binary>=2.9.0",
     "cryptography>=41.0.0",
     "mcp>=1.0.0",
+    "vivian-shared",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
 ]
 
 [project.scripts]
@@ -27,3 +34,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["vivian_api"]
+
+[tool.uv.sources]
+vivian-shared = { path = "../../packages/shared", editable = true }
