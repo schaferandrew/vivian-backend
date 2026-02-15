@@ -1,6 +1,5 @@
 """Ledger and balance router."""
 
-import json
 import logging
 from typing import Optional
 
@@ -17,7 +16,7 @@ from vivian_api.auth.dependencies import (
 from vivian_api.config import Settings
 from vivian_api.db.database import get_db
 from vivian_api.models.schemas import UnreimbursedBalanceResponse
-from vivian_api.services.mcp_client import MCPClient
+from vivian_api.services.mcp_client import MCPClient, extract_tool_result_payload
 from vivian_api.services.mcp_registry import get_mcp_server_definitions
 
 
@@ -177,8 +176,9 @@ async def get_ledger_summary(
         )
         
         # Parse the result
-        content = result.get("content", [{}])[0].get("text", "{}")
-        data = json.loads(content)
+        data = extract_tool_result_payload(result) or {}
+        if not isinstance(data, dict):
+            data = {}
         
         if not data.get("success"):
             return LedgerSummaryResponse(
@@ -267,8 +267,9 @@ async def get_charitable_summary(
         )
         
         # Parse the result
-        content = result.get("content", [{}])[0].get("text", "{}")
-        data = json.loads(content)
+        data = extract_tool_result_payload(result) or {}
+        if not isinstance(data, dict):
+            data = {}
         
         if not data.get("success"):
             return CharitableSummaryResponse(

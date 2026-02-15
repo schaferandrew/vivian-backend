@@ -23,6 +23,7 @@ python_files = ["test_*.py"]
 python_functions = ["test_*"]
 pythonpath = [
     "apps/api",
+    "apps/mcp-server",
     "packages/shared",
     "apps/test-mcp-server",
 ]
