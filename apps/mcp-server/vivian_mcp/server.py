@@ -1,27 +1,34 @@
-"""Vivian MCP Server - Household agent tools."""
+"""Vivian MCP Server - Household agent tools (FastMCP)."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, TypeVar
 
-from pydantic import ValidationError
-
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
-
-try:
-    from mcp.types import CallToolResult
-except Exception:  # pragma: no cover - older MCP SDK variants
-    CallToolResult = None  # type: ignore[assignment]
+from mcp.server.fastmcp import FastMCP
 
 from vivian_mcp.config import Settings
 from vivian_mcp.contracts import (
-    TOOL_CONTRACTS,
-    get_tool_contract,
+    AppendCharitableDonationOutput,
+    AppendExpenseOutput,
+    BulkImportFromDirectoryOutput,
+    BulkImportReceiptItem,
+    BulkImportReceiptsOutput,
+    CharitableSummaryOutput,
+    CheckCharitableDuplicatesOutput,
+    CheckDuplicatesOutput,
+    ColumnFilter,
+    GetUnreimbursedBalanceOutput,
+    ParseReceiptOutput,
+    ReadCharitableLedgerEntriesOutput,
+    ReadLedgerEntriesOutput,
+    ReimbursementStatus,
+    TOOL_CONTRACTS_BY_NAME,
+    ToolOutputModel,
+    UpdateExpenseStatusOutput,
+    UploadCharitableReceiptOutput,
+    UploadReceiptOutput,
     validate_tool_input,
     validate_tool_output,
 )
@@ -31,28 +38,34 @@ from vivian_mcp.tools.hsa_tools import HSAToolManager
 
 
 @asynccontextmanager
-async def app_lifespan(server: Server) -> AsyncIterator[Settings]:
+async def app_lifespan(server: FastMCP) -> AsyncIterator[Settings]:
     """Manage application lifecycle."""
     settings = Settings()
     yield settings
 
 
 # Create MCP server
-app = Server("vivian-mcp", lifespan=app_lifespan)
+app = FastMCP("vivian-mcp", lifespan=app_lifespan)
 
 # Initialize tool managers
 hsa_tools = HSAToolManager()
 drive_tools = DriveToolManager()
 charitable_tools = CharitableToolManager()
 
-_TOOL_SUPPORTS_OUTPUT_SCHEMA = "outputSchema" in getattr(Tool, "model_fields", {})
-_CALL_TOOL_SUPPORTS_STRUCTURED = bool(
-    CallToolResult and "structuredContent" in getattr(CallToolResult, "model_fields", {})
-)
+
+OutputT = TypeVar("OutputT", bound=ToolOutputModel)
+
+
+def _contract_description(name: str) -> str:
+    """Return the configured contract description for a tool."""
+    contract = TOOL_CONTRACTS_BY_NAME.get(name)
+    if not contract:
+        raise ValueError(f"Unknown tool contract: {name}")
+    return contract.description
 
 
 def _parse_manager_payload(raw_result: Any) -> dict[str, Any]:
-    """Normalize manager return values to dict payloads."""
+    """Normalize manager return values to dictionary payloads."""
     if isinstance(raw_result, dict):
         return raw_result
 
@@ -65,26 +78,14 @@ def _parse_manager_payload(raw_result: Any) -> dict[str, Any]:
         except Exception:
             return {"success": False, "error": raw_result}
 
-    return {"success": False, "error": f"Unsupported tool response type: {type(raw_result).__name__}"}
-
-
-def _call_tool_response(payload: dict[str, Any], *, is_error: bool = False):
-    """Build MCP tool response, preferring structuredContent when available."""
-    text = json.dumps(payload, default=str)
-    text_part = TextContent(type="text", text=text)
-
-    if _CALL_TOOL_SUPPORTS_STRUCTURED:
-        return CallToolResult(  # type: ignore[misc]
-            content=[text_part],
-            structuredContent=payload,
-            isError=is_error,
-        )
-
-    return [text_part]
+    return {
+        "success": False,
+        "error": f"Unsupported tool response type: {type(raw_result).__name__}",
+    }
 
 
 async def _execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Dispatch validated tool call and return validated payload."""
+    """Dispatch one validated tool call to the appropriate manager."""
     if name == "parse_receipt_to_expense_schema":
         raw_result = await hsa_tools.parse_receipt(arguments["pdf_path"])
     elif name == "append_expense_to_ledger":
@@ -170,77 +171,238 @@ async def _execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return _parse_manager_payload(raw_result)
 
 
-@app.list_tools()
-async def list_tools() -> list[Tool]:
-    """List available tools from typed contracts."""
-    tools: list[Tool] = []
-    for contract in TOOL_CONTRACTS:
-        payload: dict[str, Any] = {
-            "name": contract.name,
-            "description": contract.description,
-            "inputSchema": contract.input_schema(),
-        }
-        if _TOOL_SUPPORTS_OUTPUT_SCHEMA:
-            payload["outputSchema"] = contract.output_schema()
-        tools.append(Tool(**payload))
-    return tools
+async def _run_tool(name: str, output_model: type[OutputT], **arguments: Any) -> OutputT:
+    """Validate inputs/outputs around manager execution and return typed output."""
+    validated_arguments = validate_tool_input(name, arguments)
+    payload = await _execute_tool(name, validated_arguments)
+    validated_payload = validate_tool_output(name, payload)
+    return output_model.model_validate(validated_payload)
 
 
-@app.call_tool()
-async def call_tool(name: str, arguments: dict | None = None):
-    """Handle tool calls with contract validation and structured response payloads."""
-    contract = get_tool_contract(name)
-    if not contract:
-        return _call_tool_response(
-            {"success": False, "error": f"Unknown tool: {name}"},
-            is_error=True,
-        )
-
-    try:
-        validated_args = validate_tool_input(name, arguments or {})
-    except ValidationError as exc:
-        return _call_tool_response(
-            {
-                "success": False,
-                "error": "Invalid tool arguments",
-                "details": exc.errors(),
-            },
-            is_error=True,
-        )
-
-    try:
-        payload = await _execute_tool(name, validated_args)
-        validated_payload = validate_tool_output(name, payload)
-        is_error = bool(validated_payload.get("success") is False)
-        return _call_tool_response(validated_payload, is_error=is_error)
-    except ValidationError as exc:
-        return _call_tool_response(
-            {
-                "success": False,
-                "error": "Tool output failed contract validation",
-                "details": exc.errors(),
-            },
-            is_error=True,
-        )
-    except Exception as exc:
-        return _call_tool_response(
-            {
-                "success": False,
-                "error": str(exc),
-            },
-            is_error=True,
-        )
+@app.tool(
+    name="parse_receipt_to_expense_schema",
+    description=_contract_description("parse_receipt_to_expense_schema"),
+)
+async def parse_receipt_to_expense_schema(pdf_path: str) -> ParseReceiptOutput:
+    return await _run_tool("parse_receipt_to_expense_schema", ParseReceiptOutput, pdf_path=pdf_path)
 
 
-async def main():
+@app.tool(
+    name="append_expense_to_ledger",
+    description=_contract_description("append_expense_to_ledger"),
+)
+async def append_expense_to_ledger(
+    expense_json: dict[str, Any],
+    reimbursement_status: ReimbursementStatus,
+    drive_file_id: str,
+    check_duplicates: bool = True,
+    force_append: bool = False,
+) -> AppendExpenseOutput:
+    return await _run_tool(
+        "append_expense_to_ledger",
+        AppendExpenseOutput,
+        expense_json=expense_json,
+        reimbursement_status=reimbursement_status,
+        drive_file_id=drive_file_id,
+        check_duplicates=check_duplicates,
+        force_append=force_append,
+    )
+
+
+@app.tool(name="check_for_duplicates", description=_contract_description("check_for_duplicates"))
+async def check_for_duplicates(
+    expense_json: dict[str, Any],
+    fuzzy_days: int = 3,
+) -> CheckDuplicatesOutput:
+    return await _run_tool(
+        "check_for_duplicates",
+        CheckDuplicatesOutput,
+        expense_json=expense_json,
+        fuzzy_days=fuzzy_days,
+    )
+
+
+@app.tool(name="update_expense_status", description=_contract_description("update_expense_status"))
+async def update_expense_status(
+    expense_id: str,
+    new_status: ReimbursementStatus,
+    reimbursement_date: str | None = None,
+) -> UpdateExpenseStatusOutput:
+    return await _run_tool(
+        "update_expense_status",
+        UpdateExpenseStatusOutput,
+        expense_id=expense_id,
+        new_status=new_status,
+        reimbursement_date=reimbursement_date,
+    )
+
+
+@app.tool(
+    name="get_unreimbursed_balance",
+    description=_contract_description("get_unreimbursed_balance"),
+)
+async def get_unreimbursed_balance() -> GetUnreimbursedBalanceOutput:
+    return await _run_tool("get_unreimbursed_balance", GetUnreimbursedBalanceOutput)
+
+
+@app.tool(name="read_ledger_entries", description=_contract_description("read_ledger_entries"))
+async def read_ledger_entries(
+    year: int | None = None,
+    status_filter: ReimbursementStatus | None = None,
+    limit: int = 1000,
+    column_filters: list[ColumnFilter] | None = None,
+) -> ReadLedgerEntriesOutput:
+    return await _run_tool(
+        "read_ledger_entries",
+        ReadLedgerEntriesOutput,
+        year=year,
+        status_filter=status_filter,
+        limit=limit,
+        column_filters=column_filters,
+    )
+
+
+@app.tool(
+    name="bulk_import_receipts_from_directory",
+    description=_contract_description("bulk_import_receipts_from_directory"),
+)
+async def bulk_import_receipts_from_directory(
+    directory_path: str,
+    reimbursement_status_override: ReimbursementStatus | None = None,
+) -> BulkImportFromDirectoryOutput:
+    return await _run_tool(
+        "bulk_import_receipts_from_directory",
+        BulkImportFromDirectoryOutput,
+        directory_path=directory_path,
+        reimbursement_status_override=reimbursement_status_override,
+    )
+
+
+@app.tool(name="bulk_import_receipts", description=_contract_description("bulk_import_receipts"))
+async def bulk_import_receipts(
+    receipts: list[BulkImportReceiptItem],
+    check_duplicates: bool = True,
+    force_append: bool = False,
+    fuzzy_days: int = 3,
+) -> BulkImportReceiptsOutput:
+    return await _run_tool(
+        "bulk_import_receipts",
+        BulkImportReceiptsOutput,
+        receipts=receipts,
+        check_duplicates=check_duplicates,
+        force_append=force_append,
+        fuzzy_days=fuzzy_days,
+    )
+
+
+@app.tool(name="upload_receipt_to_drive", description=_contract_description("upload_receipt_to_drive"))
+async def upload_receipt_to_drive(
+    local_file_path: str,
+    status: ReimbursementStatus,
+    filename: str | None = None,
+) -> UploadReceiptOutput:
+    return await _run_tool(
+        "upload_receipt_to_drive",
+        UploadReceiptOutput,
+        local_file_path=local_file_path,
+        status=status,
+        filename=filename,
+    )
+
+
+@app.tool(
+    name="upload_charitable_receipt_to_drive",
+    description=_contract_description("upload_charitable_receipt_to_drive"),
+)
+async def upload_charitable_receipt_to_drive(
+    local_file_path: str,
+    tax_year: str | None = None,
+    filename: str | None = None,
+) -> UploadCharitableReceiptOutput:
+    return await _run_tool(
+        "upload_charitable_receipt_to_drive",
+        UploadCharitableReceiptOutput,
+        local_file_path=local_file_path,
+        tax_year=tax_year,
+        filename=filename,
+    )
+
+
+@app.tool(
+    name="append_charitable_donation_to_ledger",
+    description=_contract_description("append_charitable_donation_to_ledger"),
+)
+async def append_charitable_donation_to_ledger(
+    donation_json: dict[str, Any],
+    drive_file_id: str,
+    check_duplicates: bool = True,
+    force_append: bool = False,
+) -> AppendCharitableDonationOutput:
+    return await _run_tool(
+        "append_charitable_donation_to_ledger",
+        AppendCharitableDonationOutput,
+        donation_json=donation_json,
+        drive_file_id=drive_file_id,
+        check_duplicates=check_duplicates,
+        force_append=force_append,
+    )
+
+
+@app.tool(
+    name="check_charitable_duplicates",
+    description=_contract_description("check_charitable_duplicates"),
+)
+async def check_charitable_duplicates(
+    donation_json: dict[str, Any],
+    fuzzy_days: int = 3,
+) -> CheckCharitableDuplicatesOutput:
+    return await _run_tool(
+        "check_charitable_duplicates",
+        CheckCharitableDuplicatesOutput,
+        donation_json=donation_json,
+        fuzzy_days=fuzzy_days,
+    )
+
+
+@app.tool(name="get_charitable_summary", description=_contract_description("get_charitable_summary"))
+async def get_charitable_summary(
+    tax_year: str | int | None = None,
+    column_filters: list[ColumnFilter] | None = None,
+) -> CharitableSummaryOutput:
+    return await _run_tool(
+        "get_charitable_summary",
+        CharitableSummaryOutput,
+        tax_year=tax_year,
+        column_filters=column_filters,
+    )
+
+
+@app.tool(
+    name="read_charitable_ledger_entries",
+    description=_contract_description("read_charitable_ledger_entries"),
+)
+async def read_charitable_ledger_entries(
+    tax_year: str | int | None = None,
+    organization: str | None = None,
+    tax_deductible: bool | None = None,
+    limit: int = 1000,
+    column_filters: list[ColumnFilter] | None = None,
+) -> ReadCharitableLedgerEntriesOutput:
+    return await _run_tool(
+        "read_charitable_ledger_entries",
+        ReadCharitableLedgerEntriesOutput,
+        tax_year=tax_year,
+        organization=organization,
+        tax_deductible=tax_deductible,
+        limit=limit,
+        column_filters=column_filters,
+    )
+
+
+def main() -> None:
     """Main entry point."""
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(
-            read_stream,
-            write_stream,
-            app.create_initialization_options(),
-        )
+    app.run(transport="stdio")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
