@@ -10,6 +10,145 @@ from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 
 
+def _normalize_filter_operator(raw_operator: Any) -> str:
+    operator = str(raw_operator or "").strip().lower()
+    aliases = {
+        "eq": "equals",
+        "==": "equals",
+        "neq": "not_equals",
+        "!=": "not_equals",
+        "gte": "greater_than_or_equal",
+        ">=": "greater_than_or_equal",
+        "lte": "less_than_or_equal",
+        "<=": "less_than_or_equal",
+        "gt": "greater_than",
+        ">": "greater_than",
+        "lt": "less_than",
+        "<": "less_than",
+    }
+    return aliases.get(operator, operator)
+
+
+def _coerce_number(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _matches_column_filter(cell_value: Any, operator: str, expected_value: Any, case_sensitive: bool) -> bool:
+    text_value = "" if cell_value is None else str(cell_value)
+    expected_text = "" if expected_value is None else str(expected_value)
+
+    lhs = text_value if case_sensitive else text_value.lower()
+    rhs = expected_text if case_sensitive else expected_text.lower()
+
+    if operator == "equals":
+        return lhs == rhs
+    if operator == "not_equals":
+        return lhs != rhs
+    if operator == "contains":
+        return rhs in lhs
+    if operator == "not_contains":
+        return rhs not in lhs
+    if operator == "starts_with":
+        return lhs.startswith(rhs)
+    if operator == "ends_with":
+        return lhs.endswith(rhs)
+    if operator in {"greater_than", "greater_than_or_equal", "less_than", "less_than_or_equal"}:
+        lhs_num = _coerce_number(cell_value)
+        rhs_num = _coerce_number(expected_value)
+        if lhs_num is None or rhs_num is None:
+            return False
+        if operator == "greater_than":
+            return lhs_num > rhs_num
+        if operator == "greater_than_or_equal":
+            return lhs_num >= rhs_num
+        if operator == "less_than":
+            return lhs_num < rhs_num
+        return lhs_num <= rhs_num
+    return False
+
+
+def apply_column_filters(
+    *,
+    headers: list[Any],
+    rows: list[list[Any]],
+    column_filters: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Apply ANDed column filters to tabular rows."""
+    if not column_filters:
+        return {"success": True, "rows": rows}
+
+    normalized_headers = [str(h).strip() for h in headers]
+    header_index = {header.lower(): idx for idx, header in enumerate(normalized_headers)}
+    available_columns = sorted(normalized_headers)
+
+    compiled_filters: list[tuple[int, str, Any, bool]] = []
+    supported = {
+        "equals",
+        "not_equals",
+        "contains",
+        "not_contains",
+        "starts_with",
+        "ends_with",
+        "greater_than",
+        "greater_than_or_equal",
+        "less_than",
+        "less_than_or_equal",
+    }
+
+    for filt in column_filters:
+        if not isinstance(filt, dict):
+            return {
+                "success": False,
+                "error": "Each column filter must be an object.",
+                "available_columns": available_columns,
+            }
+        column = str(filt.get("column") or "").strip()
+        if not column:
+            return {
+                "success": False,
+                "error": "Each column filter requires a non-empty 'column'.",
+                "available_columns": available_columns,
+            }
+        idx = header_index.get(column.lower())
+        if idx is None:
+            return {
+                "success": False,
+                "error": f"Unknown column '{column}'.",
+                "available_columns": available_columns,
+            }
+
+        operator = _normalize_filter_operator(filt.get("operator", "equals"))
+        if operator not in supported:
+            return {
+                "success": False,
+                "error": (
+                    "Unsupported operator "
+                    f"'{filt.get('operator')}'. Supported operators: {', '.join(sorted(supported))}."
+                ),
+                "available_columns": available_columns,
+            }
+
+        compiled_filters.append(
+            (idx, operator, filt.get("value"), bool(filt.get("case_sensitive", False)))
+        )
+
+    filtered_rows: list[list[Any]] = []
+    for row in rows:
+        keep = True
+        for idx, operator, expected_value, case_sensitive in compiled_filters:
+            cell_value = row[idx] if idx < len(row) else None
+            if not _matches_column_filter(cell_value, operator, expected_value, case_sensitive):
+                keep = False
+                break
+        if keep:
+            filtered_rows.append(row)
+
+    return {"success": True, "rows": filtered_rows}
+
+
 class GoogleServiceMixin:
     """Mixin providing shared Google service initialization."""
     

@@ -16,7 +16,8 @@ Google Drive + Google Sheets
 
 ## Prerequisites
 
-- Python 3.11+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (manages Python + dependencies)
+- Docker + Docker Compose
 - Google Cloud project with OAuth 2.0 credentials
 - OpenRouter API key
 - Google Drive folders for receipt storage
@@ -38,11 +39,11 @@ Google Drive + Google Sheets
 ### 2. Get Google Refresh Token
 
 ```bash
-# Install Google Auth library
-pip install google-auth-oauthlib
+# Sync MCP server dependencies (includes google-auth-oauthlib)
+uv sync --project apps/mcp-server --locked
 
-# Run this Python script to get refresh token
-python scripts/get_google_token.py
+# Run this script to get refresh token
+uv run --project apps/mcp-server python scripts/get_google_token.py
 ```
 
 ### 3. Create Google Drive Structure
@@ -67,72 +68,68 @@ Get the folder IDs from the URLs and save them.
 ### 5. Environment Configuration
 
 ```bash
-# Copy example env files
-cp apps/api/.env.example apps/api/.env
-cp apps/mcp-server/.env.example apps/mcp-server/.env
+# Copy root env template used by Docker and local commands
+cp .env.example .env
 
-# Edit both files with your credentials
+# Edit .env with your credentials
 ```
 
 ### 6. Install Dependencies
 
 ```bash
-# Create virtual environments
-python -m venv venv
-cd apps/api && python -m venv venv
-cd ../mcp-server && python -m venv venv
-
-# Install dependencies (in each venv)
-pip install -e apps/api
-pip install -e apps/mcp-server
+# Sync project dependencies with uv
+uv sync --project apps/api --extra test --locked
+uv sync --project apps/test-mcp-server --extra test --locked
+uv sync --project apps/mcp-server --locked
 ```
 
 ## Running
 
-### Development
+### Command Quick Reference
+
+Run these from repo root:
 
 ```bash
-# Terminal 1: Start API
-cd apps/api
-source venv/bin/activate
-python -m vivian_api.main
+# Build
+docker build --file apps/api/Dockerfile --tag vivian-api:ci .
 
-# Terminal 2: Test endpoints
-curl http://localhost:8000/health
+# Run app for local testing (foreground)
+docker compose up api
+
+# Health check (in another terminal)
+curl -sS -m 8 http://localhost:8000/health
+
+# Test all tests (API + test MCP server)
+VIVIAN_API_ENCRYPTION_KEY=${VIVIAN_API_ENCRYPTION_KEY:-fEoEtwTZrNYkNLpLM2XXnV1l3e4dnKYGZHso5N86c10=} \
+  uv run --project apps/api --extra test pytest apps/api/tests \
+  && uv run --project apps/test-mcp-server --extra test pytest apps/test-mcp-server/tests
+
+# Test API
+VIVIAN_API_ENCRYPTION_KEY=${VIVIAN_API_ENCRYPTION_KEY:-fEoEtwTZrNYkNLpLM2XXnV1l3e4dnKYGZHso5N86c10=} \
+  uv run --project apps/api --extra test pytest apps/api/tests
+
+# Test MCP
+uv run --project apps/test-mcp-server --extra test pytest apps/test-mcp-server/tests
+
+# Test one API test
+VIVIAN_API_ENCRYPTION_KEY=${VIVIAN_API_ENCRYPTION_KEY:-fEoEtwTZrNYkNLpLM2XXnV1l3e4dnKYGZHso5N86c10=} \
+  uv run --project apps/api --extra test pytest apps/api/tests/test_auth.py::test_login_and_me_success
+
+# Test one MCP test
+uv run --project apps/test-mcp-server --extra test \
+  pytest apps/test-mcp-server/tests/test_addition.py::TestAdditionDeterminism::test_whole_numbers
 ```
 
-### Running Tests
+Important: do not use `uv run pytest` at repo root in this monorepo. Always use `uv run --project ...`.
 
-Tests are organized by app (API and MCP server). Use the helper script for consistent runs.
+Optional aliases (via `.envrc`):
 
-**Setup (one time)**
 ```bash
-cd apps/api
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[test]"
-
-cd ../test-mcp-server
-python3 -m venv venv
-source venv/bin/activate
-pip install -e ".[test]"
-```
-
-**Run tests (recommended)**
-```bash
-scripts/run-tests.sh api   # API tests only
-scripts/run-tests.sh mcp   # MCP tests only
-scripts/run-tests.sh all   # both suites
-```
-
-**Optional: .envrc aliases**
-```bash
-source .envrc
+direnv allow
 test-api
 test-mcp
 test-all
 ```
-
 ### Database Migrations (Alembic)
 
 ```bash
@@ -229,7 +226,14 @@ Session persistence:
 ### Using Docker
 
 ```bash
-docker-compose up -d
+# 1) Start API + Postgres in foreground (recommended for logs)
+docker compose up api
+
+# 2) In another terminal, verify health
+curl http://localhost:8000/health
+
+# 3) Stop services with Ctrl+C, then clean up
+docker compose down
 ```
 
 ## API Endpoints
