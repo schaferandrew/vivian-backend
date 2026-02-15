@@ -170,6 +170,7 @@ Would you like to **retry** or **try a different approach**?"""
         current_date: str | None = None,
         user_location: str | None = None,
         enabled_mcp_servers: list[str] | None = None,
+        mcp_tool_guidance: list[str] | None = None,
     ) -> str:
         """Get system prompt with optional runtime context."""
         context_lines: list[str] = []
@@ -179,6 +180,9 @@ Would you like to **retry** or **try a different approach**?"""
             context_lines.append(f"User location: {user_location}")
         if enabled_mcp_servers:
             context_lines.append(f"Enabled MCP servers: {', '.join(enabled_mcp_servers)}")
+        if mcp_tool_guidance:
+            context_lines.append("MCP tool guidance:")
+            context_lines.extend(f"  - {line}" for line in mcp_tool_guidance if line)
 
         if not context_lines:
             return cls.SYSTEM_PROMPT
