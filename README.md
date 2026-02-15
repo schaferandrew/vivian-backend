@@ -39,11 +39,11 @@ Google Drive + Google Sheets
 ### 2. Get Google Refresh Token
 
 ```bash
-# Install Google Auth library
-pip install google-auth-oauthlib
+# Sync MCP server dependencies (includes google-auth-oauthlib)
+uv sync --project apps/mcp-server
 
-# Run this Python script to get refresh token
-python scripts/get_google_token.py
+# Run this script to get refresh token
+uv run --project apps/mcp-server python scripts/get_google_token.py
 ```
 
 ### 3. Create Google Drive Structure
