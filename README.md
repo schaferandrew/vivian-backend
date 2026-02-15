@@ -40,7 +40,7 @@ Google Drive + Google Sheets
 
 ```bash
 # Sync MCP server dependencies (includes google-auth-oauthlib)
-uv sync --project apps/mcp-server
+uv sync --project apps/mcp-server --locked
 
 # Run this script to get refresh token
 uv run --project apps/mcp-server python scripts/get_google_token.py
@@ -78,51 +78,58 @@ cp .env.example .env
 
 ```bash
 # Sync project dependencies with uv
-uv sync --project apps/api --extra test
-uv sync --project apps/test-mcp-server --extra test
-uv sync --project apps/mcp-server
+uv sync --project apps/api --extra test --locked
+uv sync --project apps/test-mcp-server --extra test --locked
+uv sync --project apps/mcp-server --locked
 ```
 
 ## Running
 
-### Development
+### Command Quick Reference
+
+Run these from repo root:
 
 ```bash
-# Start API locally
-uv run --project apps/api --module vivian_api.main
+# Build
+docker build --file apps/api/Dockerfile --tag vivian-api:ci .
 
-# Test endpoint
-curl http://localhost:8000/health
-```
+# Run app for local testing (foreground)
+docker compose up api
 
-### Running Tests
+# Health check (in another terminal)
+curl -sS -m 8 http://localhost:8000/health
 
-Tests are organized by app (API and test MCP server).
+# Test all tests (API + test MCP server)
+VIVIAN_API_ENCRYPTION_KEY=${VIVIAN_API_ENCRYPTION_KEY:-fEoEtwTZrNYkNLpLM2XXnV1l3e4dnKYGZHso5N86c10=} \
+  uv run --project apps/api --extra test pytest apps/api/tests \
+  && uv run --project apps/test-mcp-server --extra test pytest apps/test-mcp-server/tests
 
-**Setup (one time)**
-```bash
-uv sync --project apps/api --extra test
-uv sync --project apps/test-mcp-server --extra test
-```
-
-**Run tests**
-```bash
-# API tests
+# Test API
 VIVIAN_API_ENCRYPTION_KEY=${VIVIAN_API_ENCRYPTION_KEY:-fEoEtwTZrNYkNLpLM2XXnV1l3e4dnKYGZHso5N86c10=} \
   uv run --project apps/api --extra test pytest apps/api/tests
 
-# MCP tests
+# Test MCP
 uv run --project apps/test-mcp-server --extra test pytest apps/test-mcp-server/tests
+
+# Test one API test
+VIVIAN_API_ENCRYPTION_KEY=${VIVIAN_API_ENCRYPTION_KEY:-fEoEtwTZrNYkNLpLM2XXnV1l3e4dnKYGZHso5N86c10=} \
+  uv run --project apps/api --extra test pytest apps/api/tests/test_auth.py::test_login_and_me_success
+
+# Test one MCP test
+uv run --project apps/test-mcp-server --extra test \
+  pytest apps/test-mcp-server/tests/test_addition.py::TestAdditionDeterminism::test_whole_numbers
 ```
 
-**Optional: .envrc aliases**
+Important: do not use `uv run pytest` at repo root in this monorepo. Always use `uv run --project ...`.
+
+Optional aliases (via `.envrc`):
+
 ```bash
 direnv allow
 test-api
 test-mcp
 test-all
 ```
-
 ### Database Migrations (Alembic)
 
 ```bash
