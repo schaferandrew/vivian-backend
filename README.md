@@ -16,7 +16,8 @@ Google Drive + Google Sheets
 
 ## Prerequisites
 
-- Python 3.11+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (manages Python + dependencies)
+- Docker + Docker Compose
 - Google Cloud project with OAuth 2.0 credentials
 - OpenRouter API key
 - Google Drive folders for receipt storage
@@ -67,24 +68,19 @@ Get the folder IDs from the URLs and save them.
 ### 5. Environment Configuration
 
 ```bash
-# Copy example env files
-cp apps/api/.env.example apps/api/.env
-cp apps/mcp-server/.env.example apps/mcp-server/.env
+# Copy root env template used by Docker and local commands
+cp .env.example .env
 
-# Edit both files with your credentials
+# Edit .env with your credentials
 ```
 
 ### 6. Install Dependencies
 
 ```bash
-# Create virtual environments
-python -m venv venv
-cd apps/api && python -m venv venv
-cd ../mcp-server && python -m venv venv
-
-# Install dependencies (in each venv)
-pip install -e apps/api
-pip install -e apps/mcp-server
+# Sync project dependencies with uv
+uv sync --project apps/api --extra test
+uv sync --project apps/test-mcp-server --extra test
+uv sync --project apps/mcp-server
 ```
 
 ## Running
@@ -92,30 +88,21 @@ pip install -e apps/mcp-server
 ### Development
 
 ```bash
-# Terminal 1: Start API
-cd apps/api
-source venv/bin/activate
-python -m vivian_api.main
+# Start API locally
+uv run --project apps/api --module vivian_api.main
 
-# Terminal 2: Test endpoints
+# Test endpoint
 curl http://localhost:8000/health
 ```
 
 ### Running Tests
 
-Tests are organized by app (API and MCP server). Use the helper script for consistent runs.
+Tests are organized by app (API and test MCP server). Use the helper script for consistent runs.
 
 **Setup (one time)**
 ```bash
-cd apps/api
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[test]"
-
-cd ../test-mcp-server
-python3 -m venv venv
-source venv/bin/activate
-pip install -e ".[test]"
+uv sync --project apps/api --extra test
+uv sync --project apps/test-mcp-server --extra test
 ```
 
 **Run tests (recommended)**
@@ -127,7 +114,7 @@ scripts/run-tests.sh all   # both suites
 
 **Optional: .envrc aliases**
 ```bash
-source .envrc
+direnv allow
 test-api
 test-mcp
 test-all
@@ -229,7 +216,14 @@ Session persistence:
 ### Using Docker
 
 ```bash
-docker-compose up -d
+# 1) Start API + Postgres in foreground (recommended for logs)
+docker compose up api
+
+# 2) In another terminal, verify health
+curl http://localhost:8000/health
+
+# 3) Stop services with Ctrl+C, then clean up
+docker compose down
 ```
 
 ## API Endpoints

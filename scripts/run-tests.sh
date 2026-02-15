@@ -5,43 +5,26 @@ SCOPE=${1:-all}
 
 TEST_ENCRYPTION_KEY=${VIVIAN_API_ENCRYPTION_KEY:-fEoEtwTZrNYkNLpLM2XXnV1l3e4dnKYGZHso5N86c10=}
 
-run_api() {
-  if [ -d "apps/api/.venv" ]; then
-    # shellcheck disable=SC1091
-    source apps/api/.venv/bin/activate
-  elif [ -d ".venv" ]; then
-    # shellcheck disable=SC1091
-    source .venv/bin/activate
-  elif [ -d "venv" ]; then
-    # shellcheck disable=SC1091
-    source venv/bin/activate
-  else
-    echo "No API virtual environment found. Create one with:"
-    echo "  cd apps/api && python3 -m venv .venv && source .venv/bin/activate && pip install -e \".[test]\""
+require_uv() {
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "uv is required but was not found."
+    echo "Install it from: https://docs.astral.sh/uv/getting-started/installation/"
     exit 1
   fi
+}
 
-  if command -v pytest >/dev/null 2>&1; then
-    VIVIAN_API_ENCRYPTION_KEY=$TEST_ENCRYPTION_KEY pytest apps/api/tests
-  else
-    echo "pytest not found in the API venv. Install dependencies with:"
-    echo "  cd apps/api && source .venv/bin/activate && pip install -e \".[test]\""
-    exit 1
-  fi
+run_api() {
+  uv sync --project apps/api --extra test --locked
+  VIVIAN_API_ENCRYPTION_KEY=$TEST_ENCRYPTION_KEY \
+    uv run --project apps/api --extra test pytest apps/api/tests
 }
 
 run_mcp() {
-  if [ -d "apps/test-mcp-server/venv" ]; then
-    # shellcheck disable=SC1091
-    source apps/test-mcp-server/venv/bin/activate
-  else
-    echo "No MCP virtual environment found. Create one with:"
-    echo "  cd apps/test-mcp-server && python3 -m venv venv && source venv/bin/activate && pip install -e \".[test]\""
-    exit 1
-  fi
-
-  (cd apps/test-mcp-server && pytest)
+  uv sync --project apps/test-mcp-server --extra test --locked
+  uv run --project apps/test-mcp-server --extra test pytest apps/test-mcp-server/tests
 }
+
+require_uv
 
 case "$SCOPE" in
   api)
