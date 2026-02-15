@@ -97,7 +97,7 @@ curl http://localhost:8000/health
 
 ### Running Tests
 
-Tests are organized by app (API and test MCP server). Use the helper script for consistent runs.
+Tests are organized by app (API and test MCP server).
 
 **Setup (one time)**
 ```bash
@@ -105,11 +105,14 @@ uv sync --project apps/api --extra test
 uv sync --project apps/test-mcp-server --extra test
 ```
 
-**Run tests (recommended)**
+**Run tests**
 ```bash
-scripts/run-tests.sh api   # API tests only
-scripts/run-tests.sh mcp   # MCP tests only
-scripts/run-tests.sh all   # both suites
+# API tests
+VIVIAN_API_ENCRYPTION_KEY=${VIVIAN_API_ENCRYPTION_KEY:-fEoEtwTZrNYkNLpLM2XXnV1l3e4dnKYGZHso5N86c10=} \
+  uv run --project apps/api --extra test pytest apps/api/tests
+
+# MCP tests
+uv run --project apps/test-mcp-server --extra test pytest apps/test-mcp-server/tests
 ```
 
 **Optional: .envrc aliases**
