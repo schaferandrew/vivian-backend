@@ -248,6 +248,19 @@ class AppendCharitableDonationOutput(ToolOutputModel):
     error: str | None = None
 
 
+class AppendCashCharitableDonationInput(ToolInputModel):
+    donation_json: dict[str, Any]
+    check_duplicates: bool = True
+    force_append: bool = False
+
+
+class AppendCashCharitableDonationOutput(ToolOutputModel):
+    success: bool
+    entry_id: str | None = None
+    tax_year: str | None = None
+    duplicate_check: dict[str, Any] | None = None
+    error: str | None = None
+
 class CharitableDuplicateMatch(ToolOutputModel):
     organization: str = ""
     date: str = ""
@@ -422,6 +435,13 @@ TOOL_CONTRACTS: tuple[MCPToolContract, ...] = (
         description="Add a charitable donation to the Google Sheets ledger",
         input_model=AppendCharitableDonationInput,
         output_model=AppendCharitableDonationOutput,
+    ),
+
+    MCPToolContract(
+        name="append_cash_charitable_donation_to_ledger",
+        description="Add a cash charitable donation directly to the Google Sheets ledger without a receipt upload",
+        input_model=AppendCashCharitableDonationInput,
+        output_model=AppendCashCharitableDonationOutput,
     ),
     MCPToolContract(
         name="check_charitable_duplicates",

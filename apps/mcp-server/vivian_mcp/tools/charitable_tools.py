@@ -31,6 +31,8 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
         "created_at",
     ]
 
+    CASH_DONATION_DRIVE_FILE_ID = "cash_donation_no_receipt"
+
     def __init__(self):
         super().__init__(Settings())
 
@@ -224,6 +226,30 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
                 "success": False,
                 "error": str(e)
             })
+
+    async def append_cash_donation_to_ledger(
+        self,
+        donation_json: dict,
+        check_duplicates: bool = True,
+        force_append: bool = False,
+    ) -> str:
+        """Append a cash donation directly to the charitable ledger.
+
+        Cash donations do not have a Drive receipt upload, so this writes a
+        sentinel Drive file id to keep the existing ledger schema unchanged.
+        """
+
+        donation_payload = dict(donation_json)
+        description = str(donation_payload.get("description", "") or "").strip()
+        if not description:
+            donation_payload["description"] = "Cash donation"
+
+        return await self.append_donation_to_ledger(
+            donation_payload,
+            self.CASH_DONATION_DRIVE_FILE_ID,
+            check_duplicates=check_duplicates,
+            force_append=force_append,
+        )
 
     async def check_for_duplicates(
         self,

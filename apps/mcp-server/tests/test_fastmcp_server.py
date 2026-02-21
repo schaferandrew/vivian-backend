@@ -89,3 +89,57 @@ async def test_read_ledger_entries_passes_column_filters(monkeypatch):
             }
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_append_cash_charitable_donation_tool_is_registered():
+    tools = await server.app.list_tools()
+    by_name = {tool.name: tool for tool in tools}
+
+    assert "append_cash_charitable_donation_to_ledger" in by_name
+
+
+@pytest.mark.asyncio
+async def test_append_cash_charitable_donation_routes_without_drive_file_id(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_append_cash_donation_to_ledger(
+        donation_json,
+        check_duplicates=True,
+        force_append=False,
+    ):
+        captured["donation_json"] = donation_json
+        captured["check_duplicates"] = check_duplicates
+        captured["force_append"] = force_append
+        return {"success": True, "entry_id": "cash123", "tax_year": "2026"}
+
+    monkeypatch.setattr(
+        server.charitable_tools,
+        "append_cash_donation_to_ledger",
+        fake_append_cash_donation_to_ledger,
+    )
+
+    _, structured = await server.app.call_tool(
+        "append_cash_charitable_donation_to_ledger",
+        {
+            "donation_json": {
+                "organization_name": "Red Cross",
+                "donation_date": "2026-03-10",
+                "amount": 100,
+            },
+            "check_duplicates": False,
+            "force_append": True,
+        },
+    )
+
+    assert structured["success"] is True
+    assert structured["entry_id"] == "cash123"
+    assert captured == {
+        "donation_json": {
+            "organization_name": "Red Cross",
+            "donation_date": "2026-03-10",
+            "amount": 100,
+        },
+        "check_duplicates": False,
+        "force_append": True,
+    }
