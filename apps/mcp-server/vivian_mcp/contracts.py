@@ -435,6 +435,8 @@ TOOL_CONTRACTS: tuple[MCPToolContract, ...] = (
         description="Add a charitable donation to the Google Sheets ledger",
         input_model=AppendCharitableDonationInput,
         output_model=AppendCharitableDonationOutput,
+        server_id="charitable_ledger",
+        model_visible=True,
     ),
 
     MCPToolContract(
@@ -442,12 +444,16 @@ TOOL_CONTRACTS: tuple[MCPToolContract, ...] = (
         description="Add a cash charitable donation directly to the Google Sheets ledger without a receipt upload",
         input_model=AppendCashCharitableDonationInput,
         output_model=AppendCashCharitableDonationOutput,
+        server_id="charitable_ledger",
+        model_visible=True,
     ),
     MCPToolContract(
         name="check_charitable_duplicates",
         description="Check if a charitable donation is a duplicate of existing entries",
         input_model=CheckCharitableDuplicatesInput,
         output_model=CheckCharitableDuplicatesOutput,
+        server_id="charitable_ledger",
+        model_visible=True,
     ),
     MCPToolContract(
         name="get_charitable_summary",

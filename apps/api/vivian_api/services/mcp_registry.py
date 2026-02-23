@@ -121,6 +121,7 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
             tools=[
                 "upload_charitable_receipt_to_drive",
                 "append_charitable_donation_to_ledger",
+                "append_cash_charitable_donation_to_ledger",
                 "check_charitable_duplicates",
                 "get_charitable_summary",
                 "read_charitable_ledger_entries",

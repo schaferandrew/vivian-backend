@@ -1,8 +1,9 @@
 """Charitable donation tools for MCP server."""
 
 import json
+import re
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from vivian_mcp.config import Settings
@@ -32,6 +33,16 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
     ]
 
     CASH_DONATION_DRIVE_FILE_ID = "cash_donation_no_receipt"
+    DONATION_DATE_FORMATS = (
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%m/%d/%Y",
+        "%m-%d-%Y",
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%b %d, %Y",
+        "%B %d, %Y",
+    )
 
     def __init__(self):
         super().__init__(Settings())
@@ -44,30 +55,221 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
 
     def _get_tax_year(self, donation_date: str) -> str:
         """Extract tax year from donation date."""
-        try:
-            # Try to parse the date and extract year
-            date_formats = [
-                "%Y-%m-%d",
-                "%Y/%m/%d",
-                "%m/%d/%Y",
-                "%m-%d-%Y",
-                "%d/%m/%Y",
-                "%d-%m-%Y",
-                "%b %d, %Y",
-                "%B %d, %Y",
-            ]
-            
-            for fmt in date_formats:
-                try:
-                    parsed_date = datetime.strptime(donation_date.strip(), fmt)
-                    return str(parsed_date.year)
-                except ValueError:
-                    continue
-        except Exception:
-            pass
-        
+        normalized = self._normalize_donation_date(donation_date)
+        if normalized:
+            return normalized.split("-", 1)[0]
+
         # Fallback to current year
         return str(datetime.now().year)
+
+    @staticmethod
+    def _first_present(payload: dict[str, Any], keys: tuple[str, ...]) -> Any:
+        for key in keys:
+            value = payload.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            return value
+        return None
+
+    @staticmethod
+    def _normalize_text(value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    @staticmethod
+    def _normalize_bool(value: Any, default: bool = True) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"true", "1", "yes", "y", "deductible"}:
+            return True
+        if text in {"false", "0", "no", "n", "not deductible", "non deductible"}:
+            return False
+        return default
+
+    @staticmethod
+    def _normalize_amount(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        text = str(value).strip()
+        if not text:
+            return None
+        cleaned = re.sub(r"[^0-9.\-]", "", text)
+        if cleaned in {"", "-", ".", "-."}:
+            return None
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _normalize_boolish(value: Any) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if not text:
+            return None
+        if text in {"true", "1", "yes", "y"}:
+            return True
+        if text in {"false", "0", "no", "n"}:
+            return False
+        return None
+
+    def _extract_cash_confirmation(self, payload: dict[str, Any]) -> bool | None:
+        explicit = self._normalize_boolish(
+            self._first_present(
+                payload,
+                (
+                    "cash_confirmation",
+                    "is_cash_donation",
+                    "cash_donation",
+                    "cash",
+                    "is_cash",
+                ),
+            )
+        )
+        if explicit is not None:
+            return explicit
+
+        payment_method = self._first_present(
+            payload,
+            ("payment_method", "payment_type", "method"),
+        )
+        if payment_method is not None:
+            method = str(payment_method).strip().lower()
+            if method in {"cash", "physical cash", "cash donation"}:
+                return True
+            if method in {
+                "card",
+                "credit",
+                "credit card",
+                "debit",
+                "debit card",
+                "check",
+                "ach",
+                "wire",
+                "bank transfer",
+            }:
+                return False
+
+        has_receipt = self._normalize_boolish(
+            self._first_present(payload, ("has_receipt", "receipt_available", "receipt_provided"))
+        )
+        if has_receipt is not None:
+            return not has_receipt
+
+        no_receipt = self._normalize_boolish(
+            self._first_present(payload, ("no_receipt", "without_receipt", "missing_receipt"))
+        )
+        if no_receipt is not None:
+            return no_receipt
+
+        return None
+
+    def _normalize_donation_date(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+
+        text = str(value).strip()
+        if not text:
+            return ""
+
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return parsed.date().isoformat()
+        except ValueError:
+            pass
+
+        for fmt in self.DONATION_DATE_FORMATS:
+            try:
+                parsed = datetime.strptime(text, fmt)
+                return parsed.date().isoformat()
+            except ValueError:
+                continue
+        return ""
+
+    @staticmethod
+    def _missing_fields_error(missing_fields: list[str]) -> str:
+        labels = {
+            "organization_name": "organization name",
+            "donation_date": "donation date",
+            "amount": "donation amount",
+            "cash_confirmation": "cash confirmation (yes/no)",
+        }
+        rendered = [labels.get(field, field) for field in missing_fields]
+        return (
+            f"Missing required donation fields: {', '.join(rendered)}. "
+            "Ask the user to provide these fields before appending."
+        )
+
+    def _normalize_donation_payload(
+        self,
+        donation_json: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        payload = donation_json if isinstance(donation_json, dict) else {}
+
+        organization_name = self._normalize_text(
+            self._first_present(
+                payload,
+                ("organization_name", "organization", "org_name", "charity_name", "charity", "recipient"),
+            )
+        )
+        donation_date = self._normalize_donation_date(
+            self._first_present(payload, ("donation_date", "date", "donationDate", "service_date", "paid_date"))
+        )
+        amount = self._normalize_amount(self._first_present(payload, ("amount", "donation_amount", "total")))
+        tax_deductible = self._normalize_bool(
+            self._first_present(payload, ("tax_deductible", "taxDeductible", "deductible")),
+            default=True,
+        )
+        description = self._normalize_text(
+            self._first_present(payload, ("description", "notes", "note", "memo"))
+        )
+
+        confidence_raw = self._first_present(payload, ("confidence",))
+        confidence = 0.9
+        if confidence_raw is not None:
+            try:
+                confidence = float(confidence_raw)
+            except (TypeError, ValueError):
+                confidence = 0.9
+
+        normalized = {
+            "organization_name": organization_name,
+            "donation_date": donation_date,
+            "amount": amount,
+            "tax_deductible": tax_deductible,
+            "description": description,
+            "confidence": confidence,
+        }
+
+        missing_fields: list[str] = []
+        if not organization_name:
+            missing_fields.append("organization_name")
+        if not donation_date:
+            missing_fields.append("donation_date")
+        if amount is None or amount <= 0:
+            missing_fields.append("amount")
+
+        return normalized, missing_fields
 
     async def upload_receipt_to_drive(
         self,
@@ -142,13 +344,22 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
             JSON string with success, entry_id, error
         """
         try:
-            # Extract data
-            organization_name = donation_json.get("organization_name", "Unknown")
-            donation_date = donation_json.get("donation_date", "")
-            amount = donation_json.get("amount", 0)
-            tax_deductible = donation_json.get("tax_deductible", True)
-            description = donation_json.get("description", "")
-            confidence = donation_json.get("confidence", 0.9)
+            normalized_donation, missing_fields = self._normalize_donation_payload(donation_json)
+            if missing_fields:
+                return json.dumps({
+                    "success": False,
+                    "error": self._missing_fields_error(missing_fields),
+                    "missing_fields": missing_fields,
+                    "normalized_donation_json": normalized_donation,
+                })
+
+            # Extract normalized data
+            organization_name = normalized_donation["organization_name"]
+            donation_date = normalized_donation["donation_date"]
+            amount = normalized_donation["amount"]
+            tax_deductible = normalized_donation["tax_deductible"]
+            description = normalized_donation["description"]
+            confidence = normalized_donation["confidence"]
             
             # Calculate tax year
             tax_year = self._get_tax_year(donation_date)
@@ -176,7 +387,7 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
             
             # Check for duplicates if requested
             if check_duplicates and not force_append:
-                duplicate_check = await self.check_for_duplicates(donation_json)
+                duplicate_check = await self.check_for_duplicates(normalized_donation)
                 
                 if duplicate_check.get("is_duplicate"):
                     return json.dumps({
@@ -239,10 +450,42 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
         sentinel Drive file id to keep the existing ledger schema unchanged.
         """
 
-        donation_payload = dict(donation_json)
-        description = str(donation_payload.get("description", "") or "").strip()
+        donation_payload = dict(donation_json or {})
+        normalized_donation, missing_fields = self._normalize_donation_payload(donation_payload)
+        cash_confirmation = self._extract_cash_confirmation(donation_payload)
+        normalized_donation["cash_confirmation"] = cash_confirmation
+
+        if cash_confirmation is None:
+            missing_fields = list(dict.fromkeys([*missing_fields, "cash_confirmation"]))
+        if missing_fields:
+            return json.dumps({
+                "success": False,
+                "error": self._missing_fields_error(missing_fields),
+                "missing_fields": missing_fields,
+                "normalized_donation_json": normalized_donation,
+            })
+        if not cash_confirmation:
+            return json.dumps({
+                "success": False,
+                "error": (
+                    "This donation was not confirmed as cash. "
+                    "Upload a receipt and use append_charitable_donation_to_ledger instead."
+                ),
+                "recommended_action": "upload_receipt",
+                "next_tool": "upload_charitable_receipt_to_drive",
+                "normalized_donation_json": normalized_donation,
+            })
+
+        donation_payload["is_cash_donation"] = True
+        description = str(
+            donation_payload.get("description", "")
+            or donation_payload.get("notes", "")
+            or ""
+        ).strip()
         if not description:
             donation_payload["description"] = "Cash donation"
+        elif not donation_payload.get("description"):
+            donation_payload["description"] = description
 
         return await self.append_donation_to_ledger(
             donation_payload,
@@ -266,6 +509,17 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
             Dict with is_duplicate, potential_duplicates, recommendation
         """
         try:
+            normalized_donation, missing_fields = self._normalize_donation_payload(donation_json)
+            if missing_fields:
+                return {
+                    "is_duplicate": False,
+                    "potential_duplicates": [],
+                    "recommendation": "needs_input",
+                    "check_error": self._missing_fields_error(missing_fields),
+                    "missing_fields": missing_fields,
+                    "normalized_donation_json": normalized_donation,
+                }
+
             # Get all existing entries
             spreadsheet_id, worksheet_name = self._resolve_spreadsheet()
             rows_result = await self.get_all_rows(
@@ -305,9 +559,9 @@ class CharitableToolManager(GoogleServiceMixin, DriveOperationsMixin, SheetsOper
                 }
             
             # Extract data to check
-            new_org = donation_json.get("organization_name", "").lower().strip()
-            new_date = donation_json.get("donation_date", "")
-            new_amount = float(donation_json.get("amount", 0))
+            new_org = str(normalized_donation.get("organization_name", "")).lower().strip()
+            new_date = str(normalized_donation.get("donation_date", "")).strip()
+            new_amount = float(normalized_donation.get("amount", 0))
             
             potential_duplicates = []
             
