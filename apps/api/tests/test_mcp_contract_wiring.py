@@ -26,6 +26,8 @@ from vivian_mcp.contracts import (
     get_tool_contract,
     validate_tool_input,
 )
+from vivian_api.config import Settings
+from vivian_api.services.mcp_registry import get_mcp_server_definitions
 
 
 def test_chat_router_uses_contract_builder_for_model_tools():
@@ -46,6 +48,20 @@ def test_chat_model_tool_schema_uses_contract_parameters():
     assert specs["read_ledger_entries"]["parameters"] == contract.input_schema()
 
 
+def test_charitable_write_tools_are_model_visible():
+    specs = build_model_tool_specs()
+
+    for tool_name in (
+        "append_charitable_donation_to_ledger",
+        "append_cash_charitable_donation_to_ledger",
+        "check_charitable_duplicates",
+    ):
+        contract = get_tool_contract(tool_name)
+        assert contract is not None
+        assert specs[tool_name]["server_id"] == "charitable_ledger"
+        assert specs[tool_name]["parameters"] == contract.input_schema()
+
+
 def test_contract_input_validation_rejects_unknown_fields():
     with pytest.raises(ValidationError):
         validate_tool_input(
@@ -55,3 +71,9 @@ def test_contract_input_validation_rejects_unknown_fields():
                 "unknown": "value",
             },
         )
+
+
+def test_charitable_registry_lists_cash_append_tool():
+    definitions = get_mcp_server_definitions(Settings())
+    charitable = definitions["charitable_ledger"]
+    assert "append_cash_charitable_donation_to_ledger" in charitable.tools

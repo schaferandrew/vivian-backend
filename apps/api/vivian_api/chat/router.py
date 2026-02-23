@@ -18,6 +18,10 @@ from vivian_api.chat.document_workflows import (
     DocumentWorkflowArtifact,
     execute_document_workflows,
 )
+from vivian_api.chat.follow_up_questions import (
+    build_missing_fields_follow_up_question,
+    extract_donation_updates_from_message,
+)
 from vivian_api.chat.session import session_manager
 from vivian_api.chat.handler import chat_handler
 from vivian_api.chat.message_protocol import ChatMessage
@@ -74,6 +78,7 @@ class ChatResponse(BaseModel):
     chat_id: str
     tools_called: list[dict[str, str]] = Field(default_factory=list)
     document_workflows: list[DocumentWorkflowArtifact] = Field(default_factory=list)
+    follow_up_question: dict[str, Any] | None = None
 
 
 class ModelSelectRequest(BaseModel):
@@ -372,6 +377,12 @@ def _build_mcp_tool_guidance(enabled_servers: list[str]) -> list[str]:
                 "tax_year?, organization?, tax_deductible?, limit?, column_filters?). "
                 "column_filters items use {column, operator, value, case_sensitive?}."
             )
+            guidance.append(
+                "For charitable donation writes, include donation_json with organization_name, donation_date "
+                "(YYYY-MM-DD), and amount. If organization or donation date is missing, ask the user for it "
+                "before appending. Use the cash append path only when the user explicitly confirms the donation "
+                "was cash and there is no receipt; otherwise upload the receipt first."
+            )
     return guidance
 
 
@@ -494,6 +505,186 @@ def _tool_output_for_metadata(raw_text: str) -> str:
     if parsed is not None:
         return _compact_json(parsed)
     return raw_text
+
+
+def _normalize_pending_follow_up_question(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    question_id = str(raw.get("id") or "").strip()
+    tool_name = str(raw.get("tool_name") or "").strip()
+    server_id = str(raw.get("server_id") or "").strip()
+    prompt = str(raw.get("prompt") or "").strip()
+    arguments = raw.get("arguments")
+    if not question_id or not tool_name or not server_id or not prompt:
+        return None
+    if not isinstance(arguments, dict):
+        return None
+    missing_fields_raw = raw.get("missing_fields")
+    missing_fields = (
+        [str(item).strip() for item in missing_fields_raw if str(item).strip()]
+        if isinstance(missing_fields_raw, list)
+        else []
+    )
+    fields = raw.get("fields")
+    if not isinstance(fields, list):
+        fields = []
+    suggested_values = raw.get("suggested_values")
+    if not isinstance(suggested_values, dict):
+        suggested_values = {}
+    return {
+        "id": question_id,
+        "kind": str(raw.get("kind") or "missing_tool_fields"),
+        "tool_name": tool_name,
+        "server_id": server_id,
+        "prompt": prompt,
+        "missing_fields": missing_fields,
+        "fields": fields,
+        "suggested_values": suggested_values,
+        "arguments": arguments,
+    }
+
+
+def _pending_question_public_payload(pending: dict[str, Any]) -> dict[str, Any]:
+    """Expose pending question payload without internal execution arguments."""
+    return {
+        "id": pending["id"],
+        "kind": pending.get("kind", "missing_tool_fields"),
+        "tool_name": pending["tool_name"],
+        "server_id": pending["server_id"],
+        "prompt": pending["prompt"],
+        "missing_fields": pending.get("missing_fields", []),
+        "fields": pending.get("fields", []),
+        "suggested_values": pending.get("suggested_values", {}),
+    }
+
+
+def _format_tool_success_message(
+    tool_name: str,
+    arguments: dict[str, Any],
+    payload: dict[str, Any],
+) -> str:
+    if tool_name in {
+        "append_cash_charitable_donation_to_ledger",
+        "append_charitable_donation_to_ledger",
+    } and payload.get("success"):
+        donation = arguments.get("donation_json")
+        org = ""
+        donation_date = ""
+        amount_text = ""
+        if isinstance(donation, dict):
+            org = str(donation.get("organization_name") or donation.get("organization") or "").strip()
+            donation_date = str(donation.get("donation_date") or donation.get("date") or "").strip()
+            amount = donation.get("amount")
+            try:
+                amount_text = f"${float(amount):.2f}"
+            except Exception:
+                amount_text = ""
+        details: list[str] = []
+        if org:
+            details.append(f"**{org}**")
+        if donation_date:
+            details.append(f"on **{donation_date}**")
+        if amount_text:
+            details.append(f"for **{amount_text}**")
+        detail_text = " ".join(details) if details else "your donation"
+        entry_id = str(payload.get("entry_id") or "").strip()
+        if entry_id:
+            return f"Saved {detail_text}. Entry ID: `{entry_id}`."
+        return f"Saved {detail_text}."
+    return "Done."
+
+
+async def _try_pending_follow_up_response(
+    *,
+    message: str,
+    session,
+    current_user: CurrentUserContext,
+    db: Session,
+    enabled_mcp_servers: list[str],
+) -> tuple[str, list[dict[str, str]], dict[str, Any] | None] | None:
+    """Resume a pending tool action that previously requested missing fields."""
+    pending = _normalize_pending_follow_up_question(session.context.pending_user_question)
+    if pending is None:
+        return None
+
+    user_text = (message or "").strip()
+    lowered = user_text.lower()
+    if lowered in {"cancel", "stop", "skip", "never mind", "nevermind"} or _is_flow_closure(user_text):
+        session.context.pending_user_question = None
+        return ("Okay, I cancelled that request.", [], None)
+
+    server_id = pending["server_id"]
+    tool_name = pending["tool_name"]
+    if server_id not in enabled_mcp_servers:
+        return (
+            f"I can continue once `{server_id}` is enabled in settings.",
+            [],
+            _pending_question_public_payload(pending),
+        )
+
+    merged_arguments = dict(pending["arguments"])
+    donation_payload = merged_arguments.get("donation_json")
+    if isinstance(donation_payload, dict):
+        updates = extract_donation_updates_from_message(
+            user_text,
+            pending.get("missing_fields", []),
+        )
+        if updates:
+            merged_donation = dict(donation_payload)
+            merged_donation.update(updates)
+            merged_arguments["donation_json"] = merged_donation
+
+    home_id = _get_default_home_id(current_user)
+    mcp_client = await _create_chat_mcp_client(
+        mcp_server_id=server_id,
+        db=db,
+        home_id=home_id,
+    )
+    await mcp_client.start()
+    try:
+        result = await mcp_client.call_tool(tool_name, merged_arguments)
+        raw_text = _extract_mcp_result_text(result)
+        payload = _parse_tool_result_payload(raw_text) or {}
+        tools_called = [
+            {
+                "server_id": server_id,
+                "tool_name": tool_name,
+                "input": _compact_json(merged_arguments),
+                "output": _tool_output_for_metadata(raw_text),
+            }
+        ]
+
+        follow_up_bundle = build_missing_fields_follow_up_question(
+            tool_name=tool_name,
+            server_id=server_id,
+            arguments=merged_arguments,
+            raw_tool_output=raw_text,
+        )
+        if follow_up_bundle:
+            question, pending_state = follow_up_bundle
+            session.context.pending_user_question = pending_state
+            return question["prompt"], tools_called, question
+
+        session.context.pending_user_question = None
+        if payload.get("success"):
+            return _format_tool_success_message(tool_name, merged_arguments, payload), tools_called, None
+
+        error_text = str(payload.get("error") or "I couldn't complete that request.")
+        if payload.get("recommended_action") == "upload_receipt":
+            return (
+                f"{error_text}\n\nPlease upload the receipt so I can save it with the standard charitable receipt flow.",
+                tools_called,
+                None,
+            )
+        return f"I couldn't complete that request: {error_text}", tools_called, None
+    except Exception as exc:
+        return (
+            f"I couldn't continue that request right now: {exc}",
+            [],
+            _pending_question_public_payload(pending),
+        )
+    finally:
+        await mcp_client.stop()
 
 
 def _record_context_from_model_tool_result(session, tool_name: str, raw_text: str) -> None:
@@ -628,7 +819,7 @@ async def _run_model_tool_loop(
     current_user: CurrentUserContext,
     db: Session,
     enabled_mcp_servers: list[str],
-) -> tuple[str, list[dict[str, str]]]:
+) -> tuple[str, list[dict[str, str]], dict[str, Any] | None]:
     """Run model tool-calling loop: model -> tool_calls -> MCP -> model final response."""
     tools = _build_model_tool_schema(enabled_mcp_servers)
     if not tools:
@@ -636,7 +827,7 @@ async def _run_model_tool_loop(
             base_messages,
             web_search_enabled=web_search_enabled,
         )
-        return response_text, []
+        return response_text, [], None
 
     messages = [dict(message) for message in base_messages]
     tools_called: list[dict[str, str]] = []
@@ -667,7 +858,7 @@ async def _run_model_tool_loop(
             if not completion.tool_calls:
                 final_response = (completion.content or "").strip()
                 if final_response:
-                    return final_response, tools_called
+                    return final_response, tools_called, None
                 break
 
             for tool_call in completion.tool_calls:
@@ -694,9 +885,23 @@ async def _run_model_tool_loop(
                     call_metadata.get("server_id"),
                 )
 
+                call_input = call_metadata.get("input")
+                parsed_arguments = _parse_tool_result_payload(call_input) if isinstance(call_input, str) else None
+                follow_up_bundle = build_missing_fields_follow_up_question(
+                    tool_name=tool_call.name,
+                    server_id=str(call_metadata.get("server_id") or ""),
+                    arguments=parsed_arguments or {},
+                    raw_tool_output=raw_tool_output,
+                )
+                if follow_up_bundle:
+                    question, pending_state = follow_up_bundle
+                    session.context.pending_user_question = pending_state
+                    return question["prompt"], tools_called, question
+
         return (
             "I reached the tool-calling limit before finishing this request. Please ask again with the same details.",
             tools_called,
+            None,
         )
     finally:
         for client in mcp_clients.values():
@@ -1706,6 +1911,7 @@ async def chat_message(
 
     tools_called: list[dict[str, str]] = []
     document_workflows: list[DocumentWorkflowArtifact] = []
+    follow_up_question: dict[str, Any] | None = None
     if request.attachments:
         workflow_result = await execute_document_workflows(
             attachments=request.attachments,
@@ -1716,14 +1922,25 @@ async def chat_message(
         tools_called = workflow_result.tools_called
         document_workflows = workflow_result.artifacts
     else:
-        tool_response = await _try_dual_summary_tool_response(
+        tool_response: tuple[str, list[dict[str, str]]] | None = None
+        pending_follow_up = await _try_pending_follow_up_response(
             message=request.message,
             session=session,
             current_user=current_user,
             db=db,
             enabled_mcp_servers=session.context.enabled_mcp_servers,
         )
-        if not tool_response:
+        if pending_follow_up:
+            response_text, tools_called, follow_up_question = pending_follow_up
+        else:
+            tool_response = await _try_dual_summary_tool_response(
+                message=request.message,
+                session=session,
+                current_user=current_user,
+                db=db,
+                enabled_mcp_servers=session.context.enabled_mcp_servers,
+            )
+        if not pending_follow_up and not tool_response:
             tool_response = await _try_balance_tool_response(
                 message=request.message,
                 session=session,
@@ -1731,7 +1948,7 @@ async def chat_message(
                 db=db,
                 enabled_mcp_servers=session.context.enabled_mcp_servers,
             )
-        if not tool_response:
+        if not pending_follow_up and not tool_response:
             tool_response = await _try_charitable_tool_response(
                 message=request.message,
                 session=session,
@@ -1739,12 +1956,18 @@ async def chat_message(
                 db=db,
                 enabled_mcp_servers=session.context.enabled_mcp_servers,
             )
-        if not tool_response:
+        if not pending_follow_up and not tool_response:
             tool_response = await _try_addition_tool_response(
                 message=request.message,
                 enabled_mcp_servers=session.context.enabled_mcp_servers,
             )
-        if tool_response:
+        if pending_follow_up:
+            logger.warning(
+                "chat.message resumed_pending_question session_id=%s question_id=%s",
+                session.session_id,
+                follow_up_question.get("id") if isinstance(follow_up_question, dict) else None,
+            )
+        elif tool_response:
             response_text, tools_called = tool_response
             logger.warning(
                 "chat.message used deterministic tool routing session_id=%s tools_called=%s",
@@ -1753,7 +1976,7 @@ async def chat_message(
             )
         else:
             try:
-                response_text, tools_called = await _run_model_tool_loop(
+                response_text, tools_called, follow_up_question = await _run_model_tool_loop(
                     base_messages=messages,
                     web_search_enabled=request.web_search_enabled,
                     session=session,
@@ -1816,6 +2039,8 @@ async def chat_message(
         assistant_metadata_payload["document_workflows"] = [
             workflow.model_dump(mode="json") for workflow in document_workflows
         ]
+    if follow_up_question:
+        assistant_metadata_payload["follow_up_question"] = follow_up_question
     assistant_metadata = assistant_metadata_payload or None
     if db_chat:
         message_repo.create(
@@ -1848,6 +2073,7 @@ async def chat_message(
         chat_id=db_chat.id,
         tools_called=tools_called,
         document_workflows=document_workflows,
+        follow_up_question=follow_up_question,
     )
 
 

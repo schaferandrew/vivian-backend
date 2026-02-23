@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from vivian_mcp.config import Settings
 from vivian_mcp.contracts import (
+    AppendCashCharitableDonationOutput,
     AppendCharitableDonationOutput,
     AppendExpenseOutput,
     BulkImportFromDirectoryOutput,
@@ -144,6 +145,12 @@ async def _execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         raw_result = await charitable_tools.append_donation_to_ledger(
             arguments["donation_json"],
             arguments["drive_file_id"],
+            arguments.get("check_duplicates", True),
+            arguments.get("force_append", False),
+        )
+    elif name == "append_cash_charitable_donation_to_ledger":
+        raw_result = await charitable_tools.append_cash_donation_to_ledger(
+            arguments["donation_json"],
             arguments.get("check_duplicates", True),
             arguments.get("force_append", False),
         )
@@ -343,6 +350,24 @@ async def append_charitable_donation_to_ledger(
         AppendCharitableDonationOutput,
         donation_json=donation_json,
         drive_file_id=drive_file_id,
+        check_duplicates=check_duplicates,
+        force_append=force_append,
+    )
+
+
+@app.tool(
+    name="append_cash_charitable_donation_to_ledger",
+    description=_contract_description("append_cash_charitable_donation_to_ledger"),
+)
+async def append_cash_charitable_donation_to_ledger(
+    donation_json: dict[str, Any],
+    check_duplicates: bool = True,
+    force_append: bool = False,
+) -> AppendCashCharitableDonationOutput:
+    return await _run_tool(
+        "append_cash_charitable_donation_to_ledger",
+        AppendCashCharitableDonationOutput,
+        donation_json=donation_json,
         check_duplicates=check_duplicates,
         force_append=force_append,
     )

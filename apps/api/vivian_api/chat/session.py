@@ -94,6 +94,8 @@ class SessionContext(BaseModel):
     last_intent: Optional[str] = None
     web_search_enabled: bool = False  # Web search costs ~$0.02/query, default OFF
     enabled_mcp_servers: List[str] = Field(default_factory=list)
+    # Pending structured follow-up question waiting for user input.
+    pending_user_question: Optional[Dict[str, Any]] = None
 
 
 class ErrorRecoveryState(BaseModel):
