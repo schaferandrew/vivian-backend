@@ -199,3 +199,32 @@ class HealthCheckResponse(BaseModel):
     """Health check response."""
     status: str
     version: str = "0.1.0"
+
+
+class HomeLinkSettingCreate(BaseModel):
+    """Request to create a new home link setting."""
+    key: str = Field(..., min_length=1, max_length=100, description="Stable slug identifier (e.g. 'jellyfin', 'mealie')")
+    label: str = Field(..., min_length=1, max_length=255, description="Human-readable display name")
+    url: str = Field(..., min_length=1, description="Base URL for the service")
+    icon: Optional[str] = Field(None, max_length=255, description="Optional icon identifier or URL")
+
+
+class HomeLinkSettingUpdate(BaseModel):
+    """Request to update an existing home link setting."""
+    label: Optional[str] = Field(None, min_length=1, max_length=255)
+    url: Optional[str] = Field(None, min_length=1)
+    icon: Optional[str] = Field(None, max_length=255)
+
+
+class HomeLinkSettingResponse(BaseModel):
+    """Response for a single home link setting."""
+    id: str
+    home_id: str
+    key: str
+    label: str
+    url: str
+    icon: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+    model_config = {"from_attributes": True}

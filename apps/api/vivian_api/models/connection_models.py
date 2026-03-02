@@ -21,6 +21,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from vivian_api.db.database import Base
 
 
+# ---------------------------------------------------------------------------
+# Home link / URL settings
+# ---------------------------------------------------------------------------
+
+
 class HomeConnection(Base):
     """Service-level connection (e.g., Google Drive/Sheets) for a home.
     
@@ -79,9 +84,49 @@ class HomeConnection(Base):
     connected_by_user: Mapped["User"] = relationship("User")
 
 
+class HomeLinkSetting(Base):
+    """A named URL/link stored per home for frontend quick-access links.
+
+    Examples: Jellyfin media server, Mealie recipe manager, photo/image host.
+    The ``key`` field is a stable slug the frontend can reference by name.
+    """
+
+    __tablename__ = "home_link_settings"
+    __table_args__ = (
+        Index(
+            "ix_home_link_settings_home_id_key",
+            "home_id",
+            "key",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    home_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("homes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    key: Mapped[str] = mapped_column(String(100), nullable=False)
+    label: Mapped[str] = mapped_column(String(255), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    icon: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    home: Mapped["Home"] = relationship("Home", back_populates="link_settings")
+
+
 class McpServerSettings(Base):
     """Per-home, per-MCP-server configurable settings.
-    
+
     The settings_json field is flexible JSON that can hold any key-value pairs
     defined by the MCP server's settings_schema. This allows new MCP servers
     to define custom settings without requiring database migrations.
