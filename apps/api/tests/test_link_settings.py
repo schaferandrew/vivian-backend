@@ -78,28 +78,68 @@ def test_list_empty() -> None:
     app.dependency_overrides.clear()
 
 
-def test_create_and_list() -> None:
+def test_create_server_url_entry() -> None:
+    """server_url key stores a full URL with no port."""
     client, db, _ = _build_test_client()
     token = _get_token(client)
     headers = {"Authorization": f"Bearer {token}"}
 
-    create_resp = client.post(
+    resp = client.post(
         "/api/v1/link-settings",
         headers=headers,
-        json={"key": "jellyfin", "label": "Jellyfin", "url": "http://192.168.1.10:8096"},
+        json={"key": "server_url", "label": "Home Server", "url": "http://192.168.1.10"},
     )
-    assert create_resp.status_code == 201
-    data = create_resp.json()
-    assert data["key"] == "jellyfin"
-    assert data["label"] == "Jellyfin"
-    assert data["url"] == "http://192.168.1.10:8096"
-    assert data["icon"] is None
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["key"] == "server_url"
+    assert data["url"] == "http://192.168.1.10"
+    assert data["port"] is None
 
-    list_resp = client.get("/api/v1/link-settings", headers=headers)
-    assert list_resp.status_code == 200
-    items = list_resp.json()
-    assert len(items) == 1
-    assert items[0]["key"] == "jellyfin"
+    db.close()
+    app.dependency_overrides.clear()
+
+
+def test_create_port_based_entry() -> None:
+    """App entries store a port; url is null."""
+    client, db, _ = _build_test_client()
+    token = _get_token(client)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    resp = client.post(
+        "/api/v1/link-settings",
+        headers=headers,
+        json={"key": "jellyfin", "label": "Jellyfin", "port": 8096},
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["key"] == "jellyfin"
+    assert data["port"] == 8096
+    assert data["url"] is None
+
+    db.close()
+    app.dependency_overrides.clear()
+
+
+def test_full_server_config_flow() -> None:
+    """Create server_url + two app entries, list returns all three."""
+    client, db, _ = _build_test_client()
+    token = _get_token(client)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    client.post("/api/v1/link-settings", headers=headers,
+                json={"key": "server_url", "label": "Home Server", "url": "http://192.168.1.10"})
+    client.post("/api/v1/link-settings", headers=headers,
+                json={"key": "jellyfin", "label": "Jellyfin", "port": 8096})
+    client.post("/api/v1/link-settings", headers=headers,
+                json={"key": "mealie", "label": "Mealie", "port": 9000})
+
+    resp = client.get("/api/v1/link-settings", headers=headers)
+    assert resp.status_code == 200
+    items = {item["key"]: item for item in resp.json()}
+    assert len(items) == 3
+    assert items["server_url"]["url"] == "http://192.168.1.10"
+    assert items["jellyfin"]["port"] == 8096
+    assert items["mealie"]["port"] == 9000
 
     db.close()
     app.dependency_overrides.clear()
@@ -109,7 +149,7 @@ def test_create_duplicate_key_returns_409() -> None:
     client, db, _ = _build_test_client()
     token = _get_token(client)
     headers = {"Authorization": f"Bearer {token}"}
-    payload = {"key": "mealie", "label": "Mealie", "url": "http://192.168.1.10:9000"}
+    payload = {"key": "mealie", "label": "Mealie", "port": 9000}
 
     client.post("/api/v1/link-settings", headers=headers, json=payload)
     resp = client.post("/api/v1/link-settings", headers=headers, json=payload)
@@ -119,27 +159,34 @@ def test_create_duplicate_key_returns_409() -> None:
     app.dependency_overrides.clear()
 
 
-def test_update_link_setting() -> None:
+def test_update_port() -> None:
     client, db, _ = _build_test_client()
     token = _get_token(client)
     headers = {"Authorization": f"Bearer {token}"}
 
-    client.post(
-        "/api/v1/link-settings",
-        headers=headers,
-        json={"key": "photos", "label": "Photos", "url": "http://old.example.com"},
-    )
+    client.post("/api/v1/link-settings", headers=headers,
+                json={"key": "jellyfin", "label": "Jellyfin", "port": 8096})
 
-    update_resp = client.put(
-        "/api/v1/link-settings/photos",
-        headers=headers,
-        json={"label": "My Photos", "url": "http://new.example.com", "icon": "camera"},
-    )
-    assert update_resp.status_code == 200
-    data = update_resp.json()
-    assert data["label"] == "My Photos"
-    assert data["url"] == "http://new.example.com"
-    assert data["icon"] == "camera"
+    resp = client.put("/api/v1/link-settings/jellyfin", headers=headers, json={"port": 8920})
+    assert resp.status_code == 200
+    assert resp.json()["port"] == 8920
+
+    db.close()
+    app.dependency_overrides.clear()
+
+
+def test_update_server_url() -> None:
+    client, db, _ = _build_test_client()
+    token = _get_token(client)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    client.post("/api/v1/link-settings", headers=headers,
+                json={"key": "server_url", "label": "Home Server", "url": "http://192.168.1.10"})
+
+    resp = client.put("/api/v1/link-settings/server_url", headers=headers,
+                      json={"url": "http://192.168.1.20"})
+    assert resp.status_code == 200
+    assert resp.json()["url"] == "http://192.168.1.20"
 
     db.close()
     app.dependency_overrides.clear()
@@ -162,17 +209,11 @@ def test_delete_link_setting() -> None:
     token = _get_token(client)
     headers = {"Authorization": f"Bearer {token}"}
 
-    client.post(
-        "/api/v1/link-settings",
-        headers=headers,
-        json={"key": "todelete", "label": "Delete Me", "url": "http://example.com"},
-    )
+    client.post("/api/v1/link-settings", headers=headers,
+                json={"key": "todelete", "label": "Delete Me", "port": 1234})
 
-    del_resp = client.delete("/api/v1/link-settings/todelete", headers=headers)
-    assert del_resp.status_code == 204
-
-    list_resp = client.get("/api/v1/link-settings", headers=headers)
-    assert list_resp.json() == []
+    assert client.delete("/api/v1/link-settings/todelete", headers=headers).status_code == 204
+    assert client.get("/api/v1/link-settings", headers=headers).json() == []
 
     db.close()
     app.dependency_overrides.clear()

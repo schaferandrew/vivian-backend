@@ -34,6 +34,7 @@ def _to_response(setting: HomeLinkSetting) -> HomeLinkSettingResponse:
         key=setting.key,
         label=setting.label,
         url=setting.url,
+        port=setting.port,
         icon=setting.icon,
         created_at=setting.created_at.isoformat(),
         updated_at=setting.updated_at.isoformat(),
@@ -81,6 +82,7 @@ def create_link_setting(
         key=body.key,
         label=body.label,
         url=body.url,
+        port=body.port,
         icon=body.icon,
     )
     db.add(setting)
@@ -112,6 +114,8 @@ def update_link_setting(
         setting.label = body.label
     if body.url is not None:
         setting.url = body.url
+    if body.port is not None:
+        setting.port = body.port
     if body.icon is not None:
         setting.icon = body.icon
 

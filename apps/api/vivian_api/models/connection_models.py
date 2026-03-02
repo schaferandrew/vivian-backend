@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     JSON,
     String,
     Text,
@@ -87,8 +88,13 @@ class HomeConnection(Base):
 class HomeLinkSetting(Base):
     """A named URL/link stored per home for frontend quick-access links.
 
-    Examples: Jellyfin media server, Mealie recipe manager, photo/image host.
-    The ``key`` field is a stable slug the frontend can reference by name.
+    Two usage patterns:
+    - Full URL: set ``url``, leave ``port`` null (e.g. the ``server_url`` base entry)
+    - Port-based: set ``port``, leave ``url`` null — frontend combines the
+      home's ``server_url`` entry with this port to build the full address.
+      Entries with a null port are hidden in the UI.
+
+    Well-known keys: ``server_url``, ``jellyfin``, ``mealie``, ``images``.
     """
 
     __tablename__ = "home_link_settings"
@@ -112,7 +118,8 @@ class HomeLinkSetting(Base):
     )
     key: Mapped[str] = mapped_column(String(100), nullable=False)
     label: Mapped[str] = mapped_column(String(255), nullable=False)
-    url: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     icon: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False

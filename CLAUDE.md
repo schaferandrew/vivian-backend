@@ -22,7 +22,14 @@ FastAPI backend for the Vivian household agent. PostgreSQL in production, SQLite
 
 ## Link Settings API
 
-Link settings store named URLs for household services (Jellyfin, Mealie, image hosts, etc.) so the frontend can retrieve and display them as quick-access links. Settings are scoped per home and inferred automatically from the authenticated user's default home — no `home_id` param is needed in requests.
+Link settings store the home server's base URL and per-app port numbers so the frontend can render quick-access links to self-hosted services (Jellyfin, Mealie, photo host, etc.).
+
+### Design
+
+- **One `server_url` entry** stores the home server's base address (e.g. `http://192.168.1.10`).
+- **Per-app entries** store only a `port` integer. The frontend combines `server_url` + `:` + `port` to build the full link.
+- If an app's port is `null`, that link is hidden in the UI — the user hasn't configured it yet.
+- Settings are scoped per home and inferred from the authenticated user's default home — **no `home_id` param needed**.
 
 ### Base URL
 
@@ -45,19 +52,18 @@ Authorization: Bearer <access_token>
 #### `LinkSetting` object
 
 ```ts
-{
+type LinkSetting = {
   id: string           // UUID — stable row identifier
   home_id: string      // UUID — the home this belongs to
-  key: string          // Slug used to look up a specific service, e.g. "jellyfin"
-  label: string        // Human-readable name shown in UI, e.g. "Jellyfin"
-  url: string          // Full base URL, e.g. "http://192.168.1.10:8096"
+  key: string          // Slug: "server_url" | "jellyfin" | "mealie" | "images" | ...
+  label: string        // Display name shown in UI, e.g. "Jellyfin"
+  url: string | null   // Full URL — only set on the server_url entry (or direct links)
+  port: number | null  // Port number — set on app entries; null means link is hidden
   icon: string | null  // Optional icon identifier or URL
   created_at: string   // ISO 8601 datetime
   updated_at: string   // ISO 8601 datetime
 }
 ```
-
-The `key` is the stable identifier — use it to look up a specific service by name (e.g. always fetch the Jellyfin link by key `"jellyfin"`).
 
 ---
 
@@ -69,20 +75,35 @@ The `key` is the stable identifier — use it to look up a specific service by n
 GET /api/v1/link-settings
 ```
 
-Returns all link settings for the current user's home, sorted by key.
+Returns all entries for the current home, sorted alphabetically by key.
 
 **Response `200`**
 ```json
 [
   {
-    "id": "abc123...",
-    "home_id": "def456...",
+    "id": "...",
+    "home_id": "...",
     "key": "jellyfin",
     "label": "Jellyfin",
-    "url": "http://192.168.1.10:8096",
+    "url": null,
+    "port": 8096,
     "icon": null,
     "created_at": "2026-03-02T12:00:00",
     "updated_at": "2026-03-02T12:00:00"
+  },
+  {
+    "key": "mealie",
+    "label": "Mealie",
+    "url": null,
+    "port": null,
+    "...": "..."
+  },
+  {
+    "key": "server_url",
+    "label": "Home Server",
+    "url": "http://192.168.1.10",
+    "port": null,
+    "...": "..."
   }
 ]
 ```
@@ -95,25 +116,25 @@ Returns all link settings for the current user's home, sorted by key.
 POST /api/v1/link-settings
 ```
 
+Provide `url` for the base server entry, or `port` for app entries.
+
 **Request body**
 ```json
-{
-  "key": "jellyfin",
-  "label": "Jellyfin",
-  "url": "http://192.168.1.10:8096",
-  "icon": null
-}
+{ "key": "jellyfin", "label": "Jellyfin", "port": 8096 }
+```
+```json
+{ "key": "server_url", "label": "Home Server", "url": "http://192.168.1.10" }
 ```
 
-| Field   | Type            | Required | Notes                              |
-|---------|-----------------|----------|------------------------------------|
-| `key`   | string (≤100)   | Yes      | Slug — must be unique per home     |
-| `label` | string (≤255)   | Yes      | Display name                       |
-| `url`   | string          | Yes      | Full URL including scheme and port |
-| `icon`  | string \| null  | No       | Icon name or URL                   |
+| Field   | Type           | Required | Notes                                   |
+|---------|----------------|----------|-----------------------------------------|
+| `key`   | string (≤100)  | Yes      | Must be unique per home                 |
+| `label` | string (≤255)  | Yes      | Display name                            |
+| `url`   | string \| null | No       | Full URL (for `server_url` key)         |
+| `port`  | int \| null    | No       | 1–65535 (for app keys like `jellyfin`)  |
+| `icon`  | string \| null | No       | Icon name or URL                        |
 
 **Response `201`** — the created `LinkSetting` object.
-
 **Error `409`** — key already exists for this home.
 
 ---
@@ -126,18 +147,8 @@ PUT /api/v1/link-settings/{key}
 
 All body fields are optional; only provided fields are updated.
 
-**Request body**
-```json
-{
-  "label": "My Jellyfin",
-  "url": "http://192.168.1.20:8096",
-  "icon": "film"
-}
-```
-
-**Response `200`** — the updated `LinkSetting` object.
-
-**Error `404`** — no setting with that key exists for this home.
+**Response `200`** — updated `LinkSetting` object.
+**Error `404`** — key not found.
 
 ---
 
@@ -148,60 +159,87 @@ DELETE /api/v1/link-settings/{key}
 ```
 
 **Response `204`** — no body.
-
-**Error `404`** — no setting with that key exists for this home.
-
----
-
-### Suggested well-known keys
-
-| Key        | Service               |
-|------------|-----------------------|
-| `jellyfin` | Jellyfin media server |
-| `mealie`   | Mealie recipe manager |
-| `images`   | Photo / image host    |
-| `home`     | Home dashboard        |
-
-These are conventions only — any string key is valid.
+**Error `404`** — key not found.
 
 ---
 
-### Example: fetch and open a service link
+### Frontend Integration Pattern
+
+#### 1. On settings load — fetch all link settings
 
 ```ts
-// Fetch all links once (e.g. on app load)
 const res = await fetch('/api/v1/link-settings', {
   headers: { Authorization: `Bearer ${accessToken}` },
 });
-const links = await res.json(); // LinkSetting[]
+const settings: LinkSetting[] = await res.json();
 
-// Look up by key
-const jellyfin = links.find(l => l.key === 'jellyfin');
-if (jellyfin) window.open(jellyfin.url, '_blank');
+// Index by key for easy lookup
+const byKey = Object.fromEntries(settings.map(s => [s.key, s]));
+const serverUrl = byKey['server_url']?.url ?? '';
 ```
 
-### Example: settings form — save a new link
+#### 2. Build a full URL from server + port
 
 ```ts
+function buildUrl(serverUrl: string, port: number): string {
+  return `${serverUrl}:${port}`;
+}
+```
+
+#### 3. Render only configured links
+
+```ts
+const apps = [
+  { key: 'jellyfin', label: 'Jellyfin' },
+  { key: 'mealie',   label: 'Mealie'   },
+  { key: 'images',   label: 'Photos'   },
+];
+
+const visibleLinks = apps
+  .filter(app => byKey[app.key]?.port != null)
+  .map(app => ({
+    label: byKey[app.key].label,
+    url: buildUrl(serverUrl, byKey[app.key].port!),
+    icon: byKey[app.key].icon,
+  }));
+```
+
+#### 4. Settings form — save or update a port
+
+```ts
+// On first save (no entry yet)
 await fetch('/api/v1/link-settings', {
   method: 'POST',
-  headers: {
-    Authorization: `Bearer ${accessToken}`,
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({ key: 'mealie', label: 'Mealie', url: 'http://192.168.1.10:9000' }),
+  headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ key: 'jellyfin', label: 'Jellyfin', port: 8096 }),
+});
+
+// On subsequent save (entry exists — PUT to the key)
+await fetch('/api/v1/link-settings/jellyfin', {
+  method: 'PUT',
+  headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ port: 8920 }),
 });
 ```
 
-### Example: update an existing link
+#### 5. Clear a link (hide it from UI)
 
 ```ts
-await fetch('/api/v1/link-settings/mealie', {
-  method: 'PUT',
-  headers: {
-    Authorization: `Bearer ${accessToken}`,
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({ url: 'http://192.168.1.11:9000' }),
+await fetch('/api/v1/link-settings/jellyfin', {
+  method: 'DELETE',
+  headers: { Authorization: `Bearer ${token}` },
 });
 ```
+
+---
+
+### Well-known keys
+
+| Key          | Service               | Field to set |
+|--------------|-----------------------|--------------|
+| `server_url` | Home server base IP   | `url`        |
+| `jellyfin`   | Jellyfin media server | `port`       |
+| `mealie`     | Mealie recipe manager | `port`       |
+| `images`     | Photo / image host    | `port`       |
+
+Any other key is valid — the list above is just convention.

@@ -202,17 +202,23 @@ class HealthCheckResponse(BaseModel):
 
 
 class HomeLinkSettingCreate(BaseModel):
-    """Request to create a new home link setting."""
-    key: str = Field(..., min_length=1, max_length=100, description="Stable slug identifier (e.g. 'jellyfin', 'mealie')")
+    """Request to create a new home link setting.
+
+    Provide either ``url`` (for the ``server_url`` base entry or any full URL)
+    or ``port`` (for port-based service entries). At least one is required.
+    """
+    key: str = Field(..., min_length=1, max_length=100, description="Stable slug, e.g. 'server_url', 'jellyfin', 'mealie'")
     label: str = Field(..., min_length=1, max_length=255, description="Human-readable display name")
-    url: str = Field(..., min_length=1, description="Base URL for the service")
+    url: Optional[str] = Field(None, min_length=1, description="Full base URL (used for server_url or direct links)")
+    port: Optional[int] = Field(None, ge=1, le=65535, description="Port number — frontend combines with server_url")
     icon: Optional[str] = Field(None, max_length=255, description="Optional icon identifier or URL")
 
 
 class HomeLinkSettingUpdate(BaseModel):
-    """Request to update an existing home link setting."""
+    """Request to update an existing home link setting. All fields optional."""
     label: Optional[str] = Field(None, min_length=1, max_length=255)
     url: Optional[str] = Field(None, min_length=1)
+    port: Optional[int] = Field(None, ge=1, le=65535)
     icon: Optional[str] = Field(None, max_length=255)
 
 
@@ -222,7 +228,8 @@ class HomeLinkSettingResponse(BaseModel):
     home_id: str
     key: str
     label: str
-    url: str
+    url: Optional[str] = None
+    port: Optional[int] = None
     icon: Optional[str] = None
     created_at: str
     updated_at: str
