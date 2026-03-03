@@ -395,6 +395,7 @@ class AddNumbersOutput(ToolOutputModel):
     error: str | None = None
 
 
+
 @dataclass(frozen=True)
 class MCPToolContract:
     """Single MCP tool contract entry."""
@@ -537,6 +538,7 @@ TOOL_CONTRACTS: tuple[MCPToolContract, ...] = (
         server_id="meta_tools",
         model_visible=True,
     ),
+
 )
 
 TOOL_CONTRACTS_BY_NAME: dict[str, MCPToolContract] = {
