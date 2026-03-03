@@ -81,7 +81,8 @@ class ChatResponse(BaseModel):
     chat_id: str
     tools_called: list[dict[str, str]] = Field(default_factory=list)
     document_workflows: list[DocumentWorkflowArtifact] = Field(default_factory=list)
-    follow_up_question: dict[str, Any] | None = None
+    follow_up_question: dict[str, Any] | None = None  # Deprecated: use follow_up_questions
+    follow_up_questions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ModelSelectRequest(BaseModel):
@@ -387,7 +388,9 @@ def _build_model_tool_schema(enabled_servers: list[str]) -> list[dict[str, Any]]
     """Build model-facing function schemas for enabled read/query MCP tools."""
     tool_schema: list[dict[str, Any]] = []
     for tool_name, spec in MODEL_MCP_TOOL_SPECS.items():
-        if spec["server_id"] not in enabled_servers:
+        # Always include meta_tools (special tools that don't require MCP servers)
+        is_meta_tool = spec["server_id"] == "meta_tools"
+        if not is_meta_tool and spec["server_id"] not in enabled_servers:
             continue
         tool_schema.append(
             {
@@ -565,6 +568,63 @@ def _build_follow_up_question(
     }
 
 
+def _build_follow_up_from_meta_tool(tool_call: LLMToolCall) -> dict[str, Any]:
+    """Build FollowUpQuestion object from ask_follow_up_question tool call."""
+
+    arguments = tool_call.arguments
+    questions_data = arguments.get("questions", [])
+    context = arguments.get("context")
+
+    # Build fields array from questions
+    fields = []
+    for idx, q in enumerate(questions_data):
+        # Handle both string questions and dict questions
+        if isinstance(q, str):
+            # LLM passed a simple string question - create a text field
+            field = {
+                "key": f"answer_{idx}",
+                "label": q,
+                "type": "text",
+                "required": True,
+                "placeholder": None,
+            }
+        elif isinstance(q, dict):
+            # LLM passed a proper question object
+            field = {
+                "key": q.get("key", f"field_{len(fields)}"),
+                "label": q.get("question", ""),
+                "type": q.get("type", "text"),
+                "required": q.get("required", True),
+                "placeholder": q.get("placeholder"),
+            }
+
+            # Add options if it's a select/multiselect question
+            if "options" in q and q["options"]:
+                field["options"] = q["options"]
+        else:
+            # Skip invalid entries
+            logger.warning("chat.message INVALID_QUESTION_FORMAT q=%s", q)
+            continue
+
+        fields.append(field)
+
+    # Use context as prompt, or generate one
+    prompt = context or "Please provide the following information:"
+
+    follow_up = {
+        "id": f"followup_{tool_call.id}",
+        "kind": "proactive_clarification",
+        "server_id": "meta_tools",
+        "tool_name": "ask_follow_up_question",
+        "prompt": prompt,
+        "missing_fields": [f["key"] for f in fields],
+        "fields": fields,
+        "suggested_values": {},
+    }
+
+    return follow_up
+
+
 def _parse_tool_result_payload(raw_text: str) -> dict[str, Any] | None:
     """Best-effort parse of tool result text as JSON object."""
     try:
@@ -646,6 +706,12 @@ async def _execute_model_tool_call(
         )
 
     server_id = str(spec["server_id"])
+
+    # Special handling for ask_follow_up_question tool (meta tool, doesn't call MCP server)
+    if tool_call.name == "ask_follow_up_question":
+        follow_up = _build_follow_up_from_meta_tool(tool_call)
+        raise ToolInputMissingError(follow_up)
+
     if server_id not in enabled_mcp_servers:
         error_text = json.dumps(
             {
@@ -795,15 +861,14 @@ async def _run_model_tool_loop(
                         call_metadata.get("server_id"),
                     )
                 except ToolInputMissingError as e:
-                    # Store follow-up question in session context
-                    session.context.pending_follow_up = e.follow_up_question
+                    # Append follow-up question to session context
+                    session.context.pending_follow_ups.append(e.follow_up_question)
 
-                    # Return user-friendly message
-                    return (
-                        "I need a bit more information to complete this request. "
-                        "Please provide the missing details below.",
-                        tools_called,
-                    )
+                    # Also set singular for backward compatibility
+                    if not session.context.pending_follow_up:
+                        session.context.pending_follow_up = e.follow_up_question
+
+                    return ("I need a few more details to complete that.", tools_called)
 
         return (
             "I reached the tool-calling limit before finishing this request. Please ask again with the same details.",
@@ -1953,11 +2018,17 @@ async def chat_message(
     # Store assistant response in session (in-memory)
     session.add_message(role="assistant", content=response_text, metadata=assistant_metadata)
 
-    # Check for pending follow-up question
+    # Check for pending follow-up questions
     follow_up_question = session.context.pending_follow_up
+    follow_up_questions = session.context.pending_follow_ups
+
     if follow_up_question:
-        # Clear it from context (one-time use)
+        # Clear singular from context (one-time use)
         session.context.pending_follow_up = None
+
+    if follow_up_questions:
+        # Clear array from context (one-time use)
+        session.context.pending_follow_ups = []
 
     return ChatResponse(
         response=response_text,
@@ -1966,6 +2037,7 @@ async def chat_message(
         tools_called=tools_called,
         document_workflows=document_workflows,
         follow_up_question=follow_up_question,
+        follow_up_questions=follow_up_questions,
     )
 
 

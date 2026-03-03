@@ -94,7 +94,8 @@ class SessionContext(BaseModel):
     last_intent: Optional[str] = None
     web_search_enabled: bool = False  # Web search costs ~$0.02/query, default OFF
     enabled_mcp_servers: List[str] = Field(default_factory=list)
-    pending_follow_up: Optional[Dict[str, Any]] = None
+    pending_follow_up: Optional[Dict[str, Any]] = None  # Deprecated: use pending_follow_ups
+    pending_follow_ups: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ErrorRecoveryState(BaseModel):
