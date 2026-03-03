@@ -9,15 +9,18 @@ from typing import Any
 
 import httpx
 
-from vivian_api.config import Settings, get_selected_model, AVAILABLE_MODELS, get_ollama_base_url
+from vivian_api.config import Settings, get_selected_model, get_available_models, get_ollama_base_url
 
 
 logger = logging.getLogger(__name__)
 
 
-def _is_ollama_model(model_id: str) -> bool:
+async def _is_ollama_model(model_id: str) -> bool:
     """Check if a model ID corresponds to an Ollama model."""
-    for model in AVAILABLE_MODELS:
+    if model_id.startswith("ollama/"):
+        return True
+
+    for model in await get_available_models():
         if model["id"] == model_id:
             return model.get("provider") == "Ollama"
     return False
@@ -189,7 +192,7 @@ async def get_chat_completion_result(
 ) -> ChatCompletionResult:
     """Get completion text plus optional tool calls for model-driven function execution."""
     model = get_selected_model()
-    if _is_ollama_model(model):
+    if await _is_ollama_model(model):
         if tools:
             logger.warning(
                 "llm.tools_requested_with_ollama model=%s tools=%s",

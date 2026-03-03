@@ -34,6 +34,7 @@ from vivian_api.services.llm import (
 )
 from vivian_api.config import (
     AVAILABLE_MODELS,
+    get_available_models,
     DEFAULT_MODEL,
     Settings,
     check_ollama_status,
@@ -1522,7 +1523,8 @@ async def list_models(
     }
     
     models_with_status = []
-    for model in AVAILABLE_MODELS:
+    all_models = await get_available_models()
+    for model in all_models:
         model_info = {
             "id": model["id"],
             "name": model["name"],
@@ -1548,14 +1550,15 @@ async def select_model(
     """Change the active model (in-memory)."""
     ollama_status = await check_ollama_status()
     
-    valid_ids = [m["id"] for m in AVAILABLE_MODELS]
+    all_models = await get_available_models()
+    valid_ids = [m["id"] for m in all_models]
     if request.model_id not in valid_ids:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid model ID. Available: {valid_ids}"
         )
     
-    model = next((m for m in AVAILABLE_MODELS if m["id"] == request.model_id), None)
+    model = next((m for m in all_models if m["id"] == request.model_id), None)
     if model and model["provider"] == "Ollama" and not ollama_status.get("available", False):
         raise HTTPException(
             status_code=503,
