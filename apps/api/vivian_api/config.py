@@ -49,8 +49,18 @@ AVAILABLE_MODELS = [
         "provider": "Ollama"
     },
     {
-        "id": "qwen2.5:1.5b",
-        "name": "Qwen 2.5 1.5B",
+        "id": "qwen3.5:0.8b",
+        "name": "Qwen 3.5 0.8B",
+        "provider": "Ollama"
+    },
+    {
+        "id": "qwen3.5:2b",
+        "name": "Qwen 3.5 2B",
+        "provider": "Ollama"
+    },
+    {
+        "id": "qwen3.5:4b",
+        "name": "Qwen 3.5 4B",
         "provider": "Ollama"
     },
     {
