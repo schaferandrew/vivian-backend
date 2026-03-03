@@ -22,42 +22,6 @@ AVAILABLE_MODELS = [
     {"id": "anthropic/claude-3.5-sonnet", "name": "Claude 3.5 Sonnet", "provider": "OpenRouter"},
     {"id": "mistralai/mistral-large-2512", "name": "Mistral Large (Latest)", "provider": "OpenRouter"},
     {"id": "mistralai/devstral-2512", "name": "Devstral 2", "provider": "OpenRouter"},
-    # Ollama models (local, not via OpenRouter)
-    {
-        "id": "qwen2.5-coder:3b",
-        "name": "Qwen2.5 Coder 3B",
-        "provider": "Ollama"
-    },
-    {
-        "id": "mistral:7b-instruct",
-        "name": "Mistral 7B Instruct",
-        "provider": "Ollama"
-    },
-    {
-        "id": "mistral:7b",
-        "name": "Mistral 7B",
-        "provider": "Ollama"
-    },
-    {
-        "id": "llama3.1:8b",
-        "name": "Llama 3.1 8B",
-        "provider": "Ollama"
-    },
-    {
-        "id": "llama3.2:3b",
-        "name": "Llama 3.2 3B",
-        "provider": "Ollama"
-    },
-    {
-        "id": "qwen2.5:1.5b",
-        "name": "Qwen 2.5 1.5B",
-        "provider": "Ollama"
-    },
-    {
-        "id": "deepseek-coder:1.3b",
-        "name": "DeepSeek Coder 1.3B",
-        "provider": "Ollama"
-    }
 ]
 
 DEFAULT_MODEL = "google/gemini-3-flash-preview"
@@ -225,6 +189,46 @@ async def check_ollama_status() -> dict:
             return {"status": "error", "available": False}
     except Exception:
         return {"status": "offline", "available": False}
+
+
+async def get_ollama_models() -> list[dict[str, str]]:
+    """Get available local Ollama models from the Ollama API."""
+    ollama_url = get_ollama_base_url()
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{ollama_url}/api/tags", timeout=3.0)
+            if response.status_code != 200:
+                return []
+
+            payload = response.json()
+            models = payload.get("models", [])
+            if not isinstance(models, list):
+                return []
+
+            available_models: list[dict[str, str]] = []
+            for model in models:
+                if not isinstance(model, dict):
+                    continue
+                name = model.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                model_name = name.strip()
+                available_models.append(
+                    {
+                        "id": f"ollama/{model_name}",
+                        "name": model_name,
+                        "provider": "Ollama",
+                    }
+                )
+
+            return available_models
+    except Exception:
+        return []
+
+
+async def get_available_models() -> list[dict[str, object]]:
+    """Return all selectable models including runtime Ollama models."""
+    return [*AVAILABLE_MODELS, *(await get_ollama_models())]
 
 
 settings = Settings()
