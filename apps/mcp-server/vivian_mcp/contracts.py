@@ -334,6 +334,22 @@ class ReadCharitableLedgerEntriesOutput(ToolOutputModel):
     error: str | None = None
 
 
+class LogCharitableDonationInput(ToolInputModel):
+    organization: str = Field(description="Name of the charitable organization")
+    amount: float = Field(description="Donation amount in dollars", gt=0)
+    date: str = Field(description="Donation date in YYYY-MM-DD format")
+    tax_deductible: bool = Field(default=True, description="Whether tax-deductible")
+    description: str = Field(default="", description="Optional notes")
+
+
+class LogCharitableDonationOutput(ToolOutputModel):
+    success: bool
+    entry_id: str | None = None
+    tax_year: str | None = None
+    duplicate_check: dict[str, Any] | None = None
+    error: str | None = None
+
+
 class QuestionOption(BaseModel):
     """Option for a multiple choice question."""
 
@@ -507,6 +523,17 @@ TOOL_CONTRACTS: tuple[MCPToolContract, ...] = (
         ),
         input_model=ReadCharitableLedgerEntriesInput,
         output_model=ReadCharitableLedgerEntriesOutput,
+        server_id="charitable_ledger",
+        model_visible=True,
+    ),
+    MCPToolContract(
+        name="log_charitable_donation",
+        description=(
+            "Log a charitable donation to the ledger without a receipt. "
+            "Use when the user provides organization name, amount, and date manually."
+        ),
+        input_model=LogCharitableDonationInput,
+        output_model=LogCharitableDonationOutput,
         server_id="charitable_ledger",
         model_visible=True,
     ),

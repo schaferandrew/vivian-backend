@@ -379,6 +379,8 @@ def _build_mcp_tool_guidance(enabled_servers: list[str]) -> list[str]:
                 "For charitable totals, use get_charitable_summary(tax_year?, column_filters?). "
                 "For filtered donation lists/details, use read_charitable_ledger_entries("
                 "tax_year?, organization?, tax_deductible?, limit?, column_filters?). "
+                "To log a donation without a receipt (user provides org, amount, date manually), "
+                "use log_charitable_donation(organization, amount, date, tax_deductible?, description?). "
                 "column_filters items use {column, operator, value, case_sensitive?}."
             )
     return guidance
@@ -485,6 +487,27 @@ def _coerce_model_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> d
         column_filters = arguments.get("column_filters")
         if isinstance(column_filters, list):
             normalized["column_filters"] = column_filters
+        return normalized
+
+    if tool_name == "log_charitable_donation":
+        normalized: dict[str, Any] = {}
+        if org := arguments.get("organization"):
+            normalized["organization"] = str(org).strip()
+        if amt := arguments.get("amount"):
+            try:
+                normalized["amount"] = float(str(amt).strip().lstrip("$").replace(",", ""))
+            except ValueError:
+                pass
+        if dt := arguments.get("date"):
+            normalized["date"] = str(dt).strip()
+        if "tax_deductible" in arguments:
+            val = arguments["tax_deductible"]
+            if isinstance(val, bool):
+                normalized["tax_deductible"] = val
+            elif isinstance(val, str):
+                normalized["tax_deductible"] = val.lower() in {"true", "yes", "1"}
+        if desc := arguments.get("description"):
+            normalized["description"] = str(desc).strip()
         return normalized
 
     return arguments
