@@ -54,6 +54,10 @@ class Home(Base):
         back_populates="home",
         cascade="all, delete-orphan",
     )
+    link_settings: Mapped[list["HomeLinkSetting"]] = relationship(
+        back_populates="home",
+        cascade="all, delete-orphan",
+    )
 
 
 class User(Base):
