@@ -51,6 +51,7 @@ from vivian_api.services.mcp_client import (
     extract_tool_result_text,
 )
 from vivian_api.services.mcp_registry import get_mcp_server_definitions, normalize_enabled_server_ids
+from vivian_api.services.input_guard import sanitize_text_for_llm
 from vivian_mcp.contracts import build_model_tool_specs
 
 
@@ -87,6 +88,28 @@ SUMMARY_REFINEMENT_MIN_MESSAGES = 4
 MAX_MODEL_TOOL_ROUNDS = 4
 
 MODEL_MCP_TOOL_SPECS: dict[str, dict[str, Any]] = build_model_tool_specs()
+
+
+
+def _build_llm_messages_for_session(*, session, enabled_mcp_servers: list[str]) -> list[dict[str, str]]:
+    """Build LLM message payload with input sanitization for user-controlled content."""
+    messages: list[dict[str, str]] = [
+        {
+            "role": "system",
+            "content": VivianPersonality.get_system_prompt(
+                current_date=datetime.now(timezone.utc).date().isoformat(),
+                user_location=settings.user_location or None,
+                enabled_mcp_servers=enabled_mcp_servers,
+                mcp_tool_guidance=_build_mcp_tool_guidance(enabled_mcp_servers),
+            ),
+        }
+    ]
+
+    for msg in session.messages:
+        processed = sanitize_text_for_llm(msg.get("content", ""))
+        messages.append({"role": msg["role"], "content": processed.text})
+
+    return messages
 
 
 def _normalize_title(raw: str, fallback: str) -> str:
@@ -1688,21 +1711,11 @@ async def chat_message(
     )
 
     # Convert session messages to OpenRouter format; prepend system prompt so model stays in character
-    messages = [
-        {
-            "role": "system",
-            "content": VivianPersonality.get_system_prompt(
-                current_date=datetime.now(timezone.utc).date().isoformat(),
-                user_location=settings.user_location or None,
-                enabled_mcp_servers=session.context.enabled_mcp_servers,
-                mcp_tool_guidance=_build_mcp_tool_guidance(session.context.enabled_mcp_servers),
-            ),
-        },
-        *(
-            {"role": msg["role"], "content": msg["content"]}
-            for msg in session.messages
-        ),
-    ]
+    # and sanitize user-controlled content before any LLM request.
+    messages = _build_llm_messages_for_session(
+        session=session,
+        enabled_mcp_servers=session.context.enabled_mcp_servers,
+    )
 
     tools_called: list[dict[str, str]] = []
     document_workflows: list[DocumentWorkflowArtifact] = []
