@@ -22,7 +22,7 @@ def upgrade() -> None:
     op.create_table(
         "home_link_settings",
         sa.Column("id", postgresql.UUID(as_uuid=False), primary_key=True, server_default=sa.text("gen_random_uuid()")),
-        sa.Column("home_id", postgresql.UUID(as_uuid=False), sa.ForeignKey("homes.id", ondelete="CASCADE"), nullable=False, index=True),
+        sa.Column("home_id", postgresql.UUID(as_uuid=False), sa.ForeignKey("homes.id", ondelete="CASCADE"), nullable=False),
         sa.Column("key", sa.String(length=100), nullable=False),
         sa.Column("label", sa.String(length=255), nullable=False),
         sa.Column("url", sa.Text(), nullable=False),

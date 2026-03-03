@@ -243,3 +243,86 @@ await fetch('/api/v1/link-settings/jellyfin', {
 | `images`     | Photo / image host    | `port`       |
 
 Any other key is valid — the list above is just convention.
+
+---
+
+## Development Workflow
+
+### Python Environment
+
+This project uses a Python virtual environment (venv) located at `.venv/` in the repository root.
+
+**Activate the virtual environment:**
+```bash
+source .venv/bin/activate
+```
+
+### Database Migrations
+
+The project uses Alembic for database schema management.
+
+**Check current migration version:**
+```bash
+cd apps/api
+source ../../.venv/bin/activate
+alembic current
+```
+
+**Run pending migrations:**
+```bash
+cd apps/api
+source ../../.venv/bin/activate
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/vivian" alembic upgrade head
+```
+
+**Important notes:**
+- The backend container automatically runs migrations on startup via the entrypoint script
+- When developing locally and pulling new branches, you may need to run migrations manually
+- The `DATABASE_URL` environment variable defaults to `localhost:5432` which maps to the Docker postgres container
+- In `.env`, the database hostname is `postgres:5432` (for container-to-container communication)
+
+### After Merging New Code
+
+When you merge a feature branch that includes new API endpoints or database changes:
+
+1. **Run database migrations** (if schema changed):
+   ```bash
+   cd apps/api
+   source ../../.venv/bin/activate
+   DATABASE_URL="postgresql://postgres:postgres@localhost:5432/vivian" alembic upgrade head
+   ```
+
+2. **Restart the backend container** to pick up new code:
+   ```bash
+   docker compose restart api
+   ```
+
+3. **Verify the endpoint** is working:
+   ```bash
+   docker logs vivian-backend-api-1 --tail 20
+   ```
+
+### Common Issues
+
+#### "Failed to load" errors in frontend
+- Usually means the backend database hasn't been migrated yet
+- Check `alembic current` vs `alembic heads` to see if migrations are pending
+- Run `alembic upgrade head` to apply pending migrations
+
+#### Duplicate table/index errors in migrations
+- Alembic Column definitions with `index=True` automatically create indexes
+- Don't explicitly call `op.create_index()` for the same column - this creates a duplicate
+- **Example bug:**
+  ```python
+  # BAD - creates index twice
+  sa.Column("home_id", UUID, ForeignKey("homes.id"), index=True),  # Creates ix_table_home_id
+  op.create_index("ix_table_home_id", "table", ["home_id"])       # Duplicate!
+
+  # GOOD - only create once
+  sa.Column("home_id", UUID, ForeignKey("homes.id")),
+  op.create_index("ix_table_home_id", "table", ["home_id"])
+  ```
+
+#### Backend container has stale code
+- The container doesn't automatically reload when you merge branches
+- Always restart the API container after merging: `docker compose restart api`
