@@ -61,6 +61,13 @@ logger = logging.getLogger(__name__)
 ENABLED_SERVERS_PREFS_KEY = "__enabled_servers__"
 
 
+class ToolInputMissingError(Exception):
+    """Raised when tool inputs are missing and user follow-up is needed."""
+    def __init__(self, follow_up_question: dict[str, Any]):
+        self.follow_up_question = follow_up_question
+        super().__init__("Missing required tool inputs")
+
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
@@ -76,6 +83,8 @@ class ChatResponse(BaseModel):
     chat_id: str
     tools_called: list[dict[str, str]] = Field(default_factory=list)
     document_workflows: list[DocumentWorkflowArtifact] = Field(default_factory=list)
+    follow_up_question: dict[str, Any] | None = None  # Deprecated: use follow_up_questions
+    follow_up_questions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ModelSelectRequest(BaseModel):
@@ -394,6 +403,8 @@ def _build_mcp_tool_guidance(enabled_servers: list[str]) -> list[str]:
                 "For charitable totals, use get_charitable_summary(tax_year?, column_filters?). "
                 "For filtered donation lists/details, use read_charitable_ledger_entries("
                 "tax_year?, organization?, tax_deductible?, limit?, column_filters?). "
+                "To log a donation without a receipt (user provides org, amount, date manually), "
+                "use log_charitable_donation(organization, amount, date, tax_deductible?, description?). "
                 "column_filters items use {column, operator, value, case_sensitive?}."
             )
     return guidance
@@ -403,7 +414,9 @@ def _build_model_tool_schema(enabled_servers: list[str]) -> list[dict[str, Any]]
     """Build model-facing function schemas for enabled read/query MCP tools."""
     tool_schema: list[dict[str, Any]] = []
     for tool_name, spec in MODEL_MCP_TOOL_SPECS.items():
-        if spec["server_id"] not in enabled_servers:
+        # Always include meta_tools (special tools that don't require MCP servers)
+        is_meta_tool = spec["server_id"] == "meta_tools"
+        if not is_meta_tool and spec["server_id"] not in enabled_servers:
             continue
         tool_schema.append(
             {
@@ -500,7 +513,163 @@ def _coerce_model_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> d
             normalized["column_filters"] = column_filters
         return normalized
 
+    if tool_name == "log_charitable_donation":
+        normalized: dict[str, Any] = {}
+        if org := arguments.get("organization"):
+            normalized["organization"] = str(org).strip()
+        if amt := arguments.get("amount"):
+            try:
+                normalized["amount"] = float(str(amt).strip().lstrip("$").replace(",", ""))
+            except ValueError:
+                pass
+        if dt := arguments.get("date"):
+            normalized["date"] = str(dt).strip()
+        if "tax_deductible" in arguments:
+            val = arguments["tax_deductible"]
+            if isinstance(val, bool):
+                normalized["tax_deductible"] = val
+            elif isinstance(val, str):
+                normalized["tax_deductible"] = val.lower() in {"true", "yes", "1"}
+        if desc := arguments.get("description"):
+            normalized["description"] = str(desc).strip()
+        return normalized
+
     return arguments
+
+
+def _extract_field_metadata_from_schema(
+    parameter_schema: dict[str, Any],
+    missing_field_names: list[str],
+) -> list[dict[str, Any]]:
+    """Extract field metadata from JSON schema for follow-up question UI."""
+
+    properties = parameter_schema.get("properties", {})
+    required_fields = set(parameter_schema.get("required", []))
+
+    fields = []
+    for field_name in missing_field_names:
+        if field_name not in properties:
+            continue
+
+        field_schema = properties[field_name]
+
+        # Determine field type from JSON schema
+        json_type = field_schema.get("type", "string")
+        field_type = "text"
+        if json_type in ("number", "integer"):
+            field_type = "number"
+        elif "date" in field_name.lower() or "year" in field_name.lower():
+            field_type = "date"
+
+        # Generate user-friendly label
+        label = field_schema.get("title") or field_name.replace("_", " ").title()
+
+        fields.append({
+            "key": field_name,
+            "label": label,
+            "type": field_type,
+            "required": field_name in required_fields,
+            "placeholder": field_schema.get("description"),
+        })
+
+    return fields
+
+
+def _build_follow_up_question(
+    tool_call: LLMToolCall,
+    validation_error: Any,
+    spec: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build FollowUpQuestion object from validation error."""
+
+    # Extract missing field names from Pydantic ValidationError
+    missing_fields = []
+    for error in validation_error.errors():
+        if error["type"] == "missing":
+            field_name = error["loc"][0] if error["loc"] else None
+            if field_name and isinstance(field_name, str):
+                missing_fields.append(field_name)
+
+    if not missing_fields:
+        # Validation failed for other reasons (type mismatch, etc.)
+        return None
+
+    # Extract field metadata from tool's parameter schema
+    parameter_schema = spec.get("parameters", {})
+    fields = _extract_field_metadata_from_schema(parameter_schema, missing_fields)
+
+    # Generate contextual prompt
+    tool_name = tool_call.name
+    field_labels = ", ".join(f.get("label", f["key"]) for f in fields)
+    prompt = f"Please provide the following details to use {tool_name}: {field_labels}"
+
+    return {
+        "id": f"followup_{tool_call.id}",
+        "kind": "missing_tool_fields",
+        "server_id": spec["server_id"],
+        "tool_name": tool_call.name,
+        "prompt": prompt,
+        "missing_fields": missing_fields,
+        "fields": fields,
+        "suggested_values": {},  # Can be enhanced later
+    }
+
+
+def _build_follow_up_from_meta_tool(tool_call: LLMToolCall) -> dict[str, Any]:
+    """Build FollowUpQuestion object from ask_follow_up_question tool call."""
+
+    arguments = tool_call.arguments
+    questions_data = arguments.get("questions", [])
+    context = arguments.get("context")
+
+    # Build fields array from questions
+    fields = []
+    for idx, q in enumerate(questions_data):
+        # Handle both string questions and dict questions
+        if isinstance(q, str):
+            # LLM passed a simple string question - create a text field
+            field = {
+                "key": f"answer_{idx}",
+                "label": q,
+                "type": "text",
+                "required": True,
+                "placeholder": None,
+            }
+        elif isinstance(q, dict):
+            # LLM passed a proper question object
+            field = {
+                "key": q.get("key", f"field_{len(fields)}"),
+                "label": q.get("question", ""),
+                "type": q.get("type", "text"),
+                "required": q.get("required", True),
+                "placeholder": q.get("placeholder"),
+            }
+
+            # Add options if it's a select/multiselect question
+            if "options" in q and q["options"]:
+                field["options"] = q["options"]
+        else:
+            # Skip invalid entries
+            logger.warning("chat.message INVALID_QUESTION_FORMAT q=%s", q)
+            continue
+
+        fields.append(field)
+
+    # Use context as prompt, or generate one
+    prompt = context or "Please provide the following information:"
+
+    follow_up = {
+        "id": f"followup_{tool_call.id}",
+        "kind": "proactive_clarification",
+        "server_id": "meta_tools",
+        "tool_name": "ask_follow_up_question",
+        "prompt": prompt,
+        "missing_fields": [f["key"] for f in fields],
+        "fields": fields,
+        "suggested_values": {},
+    }
+
+    return follow_up
 
 
 def _parse_tool_result_payload(raw_text: str) -> dict[str, Any] | None:
@@ -584,6 +753,12 @@ async def _execute_model_tool_call(
         )
 
     server_id = str(spec["server_id"])
+
+    # Special handling for ask_follow_up_question tool (meta tool, doesn't call MCP server)
+    if tool_call.name == "ask_follow_up_question":
+        follow_up = _build_follow_up_from_meta_tool(tool_call)
+        raise ToolInputMissingError(follow_up)
+
     if server_id not in enabled_mcp_servers:
         error_text = json.dumps(
             {
@@ -602,6 +777,20 @@ async def _execute_model_tool_call(
         )
 
     normalized_arguments = _coerce_model_tool_arguments(tool_call.name, tool_call.arguments)
+
+    # Validate tool inputs and raise follow-up question if missing required fields
+    from pydantic import ValidationError
+    from vivian_mcp.contracts import validate_tool_input
+
+    try:
+        validate_tool_input(tool_call.name, normalized_arguments)
+    except ValidationError as e:
+        follow_up = _build_follow_up_question(tool_call, e, spec)
+        if follow_up:
+            # Raise custom exception to signal missing inputs
+            raise ToolInputMissingError(follow_up)
+        # Fall through to normal error handling if no follow-up
+
     try:
         client = mcp_clients.get(server_id)
         if client is None:
@@ -695,28 +884,38 @@ async def _run_model_tool_loop(
                 break
 
             for tool_call in completion.tool_calls:
-                raw_tool_output, call_metadata = await _execute_model_tool_call(
-                    tool_call=tool_call,
-                    current_user=current_user,
-                    db=db,
-                    enabled_mcp_servers=enabled_mcp_servers,
-                    mcp_clients=mcp_clients,
-                )
-                tools_called.append(call_metadata)
-                _record_context_from_model_tool_result(session, tool_call.name, raw_tool_output)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_call.name,
-                        "content": raw_tool_output,
-                    }
-                )
-                logger.warning(
-                    "chat.message tool_executed name=%s server_id=%s",
-                    tool_call.name,
-                    call_metadata.get("server_id"),
-                )
+                try:
+                    raw_tool_output, call_metadata = await _execute_model_tool_call(
+                        tool_call=tool_call,
+                        current_user=current_user,
+                        db=db,
+                        enabled_mcp_servers=enabled_mcp_servers,
+                        mcp_clients=mcp_clients,
+                    )
+                    tools_called.append(call_metadata)
+                    _record_context_from_model_tool_result(session, tool_call.name, raw_tool_output)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": tool_call.name,
+                            "content": raw_tool_output,
+                        }
+                    )
+                    logger.warning(
+                        "chat.message tool_executed name=%s server_id=%s",
+                        tool_call.name,
+                        call_metadata.get("server_id"),
+                    )
+                except ToolInputMissingError as e:
+                    # Append follow-up question to session context
+                    session.context.pending_follow_ups.append(e.follow_up_question)
+
+                    # Also set singular for backward compatibility
+                    if not session.context.pending_follow_up:
+                        session.context.pending_follow_up = e.follow_up_question
+
+                    return ("I need a few more details to complete that.", tools_called)
 
         return (
             "I reached the tool-calling limit before finishing this request. Please ask again with the same details.",
@@ -1858,12 +2057,26 @@ async def chat_message(
     # Store assistant response in session (in-memory)
     session.add_message(role="assistant", content=response_text, metadata=assistant_metadata)
 
+    # Check for pending follow-up questions
+    follow_up_question = session.context.pending_follow_up
+    follow_up_questions = session.context.pending_follow_ups
+
+    if follow_up_question:
+        # Clear singular from context (one-time use)
+        session.context.pending_follow_up = None
+
+    if follow_up_questions:
+        # Clear array from context (one-time use)
+        session.context.pending_follow_ups = []
+
     return ChatResponse(
         response=response_text,
         session_id=session.session_id,
         chat_id=db_chat.id,
         tools_called=tools_called,
         document_workflows=document_workflows,
+        follow_up_question=follow_up_question,
+        follow_up_questions=follow_up_questions,
     )
 
 

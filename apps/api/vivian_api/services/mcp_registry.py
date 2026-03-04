@@ -124,6 +124,7 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
                 "check_charitable_duplicates",
                 "get_charitable_summary",
                 "read_charitable_ledger_entries",
+                "log_charitable_donation",
             ],
             source="builtin",
             requires_connection="google",

@@ -334,6 +334,85 @@ class ReadCharitableLedgerEntriesOutput(ToolOutputModel):
     error: str | None = None
 
 
+class LogCharitableDonationInput(ToolInputModel):
+    organization: str = Field(description="Name of the charitable organization")
+    amount: float = Field(description="Donation amount in dollars", gt=0)
+    date: str = Field(description="Donation date in YYYY-MM-DD format")
+    tax_deductible: bool = Field(default=True, description="Whether tax-deductible")
+    description: str = Field(default="", description="Optional notes")
+    drive_file_id: str = Field(default="cash_donation_no_receipt", description="Google Drive file ID of the receipt, if available")
+
+
+class LogCharitableDonationOutput(ToolOutputModel):
+    success: bool
+    entry_id: str | None = None
+    tax_year: str | None = None
+    duplicate_check: dict[str, Any] | None = None
+    error: str | None = None
+
+
+class QuestionOption(BaseModel):
+    """Option for a multiple choice question."""
+
+    value: str = Field(description="The value to return if this option is selected")
+    label: str = Field(description="Display text for this option")
+    requires_text_input: bool = Field(
+        default=False, description="If true, this option (typically 'Other') requires additional text input"
+    )
+
+
+class QuestionField(BaseModel):
+    """A single question field in a follow-up question."""
+
+    key: str = Field(description="Unique identifier for this question field")
+    question: str = Field(description="The question to ask the user")
+    type: Literal["text", "select", "multiselect"] = Field(
+        description="Type of input: 'text' for open-ended, 'select' for single choice, 'multiselect' for multiple choices"
+    )
+    required: bool = Field(default=True, description="Whether this question must be answered")
+    placeholder: str | None = Field(default=None, description="Placeholder text for text inputs")
+    options: list[QuestionOption] | None = Field(
+        default=None, description="Options for select/multiselect questions"
+    )
+
+
+class AskFollowUpQuestionInput(ToolInputModel):
+    """Input for asking follow-up questions to the user."""
+
+    questions: list[QuestionField] = Field(
+        description="List of questions to ask the user. Can ask 1-5 questions at once.",
+        min_length=1,
+        max_length=5,
+    )
+    context: str | None = Field(
+        default=None, description="Optional context explaining why these questions are being asked"
+    )
+
+
+class AskFollowUpQuestionOutput(ToolOutputModel):
+    """Output from asking follow-up questions."""
+
+    success: bool
+    questions_asked: int
+    message: str
+
+
+class AddNumbersInput(ToolInputModel):
+    """Input for the test addition tool."""
+
+    a: float = Field(description="First number")
+    b: float = Field(description="Second number")
+
+
+class AddNumbersOutput(ToolOutputModel):
+    """Output from the test addition tool."""
+
+    success: bool
+    sum: float | None = None
+    error: str | None = None
+
+
+
 @dataclass(frozen=True)
 class MCPToolContract:
     """Single MCP tool contract entry."""
@@ -448,6 +527,46 @@ TOOL_CONTRACTS: tuple[MCPToolContract, ...] = (
         server_id="charitable_ledger",
         model_visible=True,
     ),
+    MCPToolContract(
+        name="log_charitable_donation",
+        description=(
+            "Log a charitable donation to the ledger without a receipt. "
+            "Use when the user provides organization name, amount, and date manually."
+        ),
+        input_model=LogCharitableDonationInput,
+        output_model=LogCharitableDonationOutput,
+        server_id="charitable_ledger",
+        model_visible=True,
+    ),
+    MCPToolContract(
+        name="add_numbers",
+        description="Add two numbers together. Use when the user asks to add numbers or test the addition MCP.",
+        input_model=AddNumbersInput,
+        output_model=AddNumbersOutput,
+        server_id="test_addition",
+        model_visible=True,
+    ),
+    MCPToolContract(
+        name="ask_follow_up_question",
+        description=(
+            "Use this tool when you need structured information from the user to complete any task — "
+            "logging an entry, calling a tool, or looking something up. "
+            "Examples: organization + amount + date to log a donation, year to query expenses, provider to filter records. "
+            "For greetings or casual chat, respond normally in text instead."
+            "\n\nMULTIPLE CHOICE — use select when you have a known set of options:"
+            "\nquestions=[{"
+            "\n  key: 'year', question: 'Which year?', type: 'select',"
+            "\n  options: [{value: '2024', label: '2024'}, {value: '2025', label: '2025'}]"
+            "\n}]"
+            "\n\nTEXT INPUT — use text for open-ended values:"
+            "\nquestions=[{key: 'provider', question: 'Which provider?', type: 'text'}]"
+        ),
+        input_model=AskFollowUpQuestionInput,
+        output_model=AskFollowUpQuestionOutput,
+        server_id="meta_tools",
+        model_visible=True,
+    ),
+
 )
 
 TOOL_CONTRACTS_BY_NAME: dict[str, MCPToolContract] = {

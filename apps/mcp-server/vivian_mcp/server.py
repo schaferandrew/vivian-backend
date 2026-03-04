@@ -20,6 +20,8 @@ from vivian_mcp.contracts import (
     CheckDuplicatesOutput,
     ColumnFilter,
     GetUnreimbursedBalanceOutput,
+    LogCharitableDonationInput,
+    LogCharitableDonationOutput,
     ParseReceiptOutput,
     ReadCharitableLedgerEntriesOutput,
     ReadLedgerEntriesOutput,
@@ -164,6 +166,21 @@ async def _execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             tax_deductible=arguments.get("tax_deductible"),
             limit=arguments.get("limit", 1000),
             column_filters=arguments.get("column_filters"),
+        )
+    elif name == "log_charitable_donation":
+        donation_json = {
+            "organization_name": arguments["organization"],
+            "donation_date": arguments["date"],
+            "amount": arguments["amount"],
+            "tax_deductible": arguments.get("tax_deductible", True),
+            "description": arguments.get("description", ""),
+            "confidence": 0.9,
+        }
+        raw_result = await charitable_tools.append_donation_to_ledger(
+            donation_json=donation_json,
+            drive_file_id=arguments.get("drive_file_id", "cash_donation_no_receipt"),
+            check_duplicates=True,
+            force_append=False,
         )
     else:
         raise ValueError(f"Unknown tool: {name}")
@@ -396,6 +413,26 @@ async def read_charitable_ledger_entries(
         tax_deductible=tax_deductible,
         limit=limit,
         column_filters=column_filters,
+    )
+
+
+@app.tool(
+    name="log_charitable_donation",
+    description=_contract_description("log_charitable_donation"),
+)
+async def log_charitable_donation(
+    organization: str,
+    amount: float,
+    date: str,
+    tax_deductible: bool = True,
+    description: str = "",
+    drive_file_id: str = "cash_donation_no_receipt",
+) -> LogCharitableDonationOutput:
+    return await _run_tool(
+        "log_charitable_donation", LogCharitableDonationOutput,
+        organization=organization, amount=amount, date=date,
+        tax_deductible=tax_deductible, description=description,
+        drive_file_id=drive_file_id,
     )
 
 
