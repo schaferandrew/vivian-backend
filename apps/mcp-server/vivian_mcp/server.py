@@ -178,7 +178,7 @@ async def _execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         }
         raw_result = await charitable_tools.append_donation_to_ledger(
             donation_json=donation_json,
-            drive_file_id="cash_donation_no_receipt",
+            drive_file_id=arguments.get("drive_file_id", "cash_donation_no_receipt"),
             check_duplicates=True,
             force_append=False,
         )
@@ -426,11 +426,13 @@ async def log_charitable_donation(
     date: str,
     tax_deductible: bool = True,
     description: str = "",
+    drive_file_id: str = "cash_donation_no_receipt",
 ) -> LogCharitableDonationOutput:
     return await _run_tool(
         "log_charitable_donation", LogCharitableDonationOutput,
         organization=organization, amount=amount, date=date,
         tax_deductible=tax_deductible, description=description,
+        drive_file_id=drive_file_id,
     )
 
 

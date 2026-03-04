@@ -340,6 +340,7 @@ class LogCharitableDonationInput(ToolInputModel):
     date: str = Field(description="Donation date in YYYY-MM-DD format")
     tax_deductible: bool = Field(default=True, description="Whether tax-deductible")
     description: str = Field(default="", description="Optional notes")
+    drive_file_id: str = Field(default="cash_donation_no_receipt", description="Google Drive file ID of the receipt, if available")
 
 
 class LogCharitableDonationOutput(ToolOutputModel):
