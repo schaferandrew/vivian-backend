@@ -7,6 +7,7 @@ from typing import Any
 import uuid
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -123,3 +124,62 @@ class McpServerSettings(Base):
     )
 
     home: Mapped["Home"] = relationship("Home", back_populates="mcp_settings")
+
+
+class McpCustomServerDefinition(Base):
+    """Per-home MCP server definitions that can be customized by users."""
+
+    __tablename__ = "mcp_custom_server_definitions"
+    __table_args__ = (
+        Index(
+            "ix_mcp_custom_server_definitions_home_id_server_id",
+            "home_id",
+            "server_id",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    home_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("homes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    server_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    command_tokens: Mapped[list[str]] = mapped_column(
+        JSONB().with_variant(JSON, "sqlite"),
+        server_default=text("'[]'"),
+        nullable=False,
+    )
+    server_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    default_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    )
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB().with_variant(JSON, "sqlite"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("NOW()"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("NOW()"),
+        onupdate=text("NOW()"),
+        nullable=False,
+    )
+
+    home: Mapped["Home"] = relationship("Home", back_populates="mcp_custom_server_definitions")

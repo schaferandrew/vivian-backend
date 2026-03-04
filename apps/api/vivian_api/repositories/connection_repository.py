@@ -9,7 +9,11 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from vivian_api.models.connection_models import HomeConnection, McpServerSettings
+from vivian_api.models.connection_models import (
+    HomeConnection,
+    McpCustomServerDefinition,
+    McpServerSettings,
+)
 from vivian_api.services.encryption import encryption_service
 
 
@@ -174,4 +178,104 @@ class McpServerSettingsRepository:
     def delete(self, settings: McpServerSettings) -> None:
         """Delete MCP server settings."""
         self.db.delete(settings)
+        self.db.commit()
+
+
+class McpCustomServerDefinitionRepository:
+    """Repository for per-home custom MCP server definitions."""
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def list_by_home(self, home_id: str) -> list[McpCustomServerDefinition]:
+        """List all custom MCP server definitions for a home."""
+        stmt = (
+            select(McpCustomServerDefinition)
+            .where(McpCustomServerDefinition.home_id == home_id)
+            .order_by(McpCustomServerDefinition.created_at.asc())
+        )
+        return list(self.db.scalars(stmt).all())
+
+    def get_by_home_and_server(
+        self,
+        home_id: str,
+        server_id: str,
+    ) -> McpCustomServerDefinition | None:
+        """Get a custom definition by home and server id."""
+        stmt = select(McpCustomServerDefinition).where(
+            McpCustomServerDefinition.home_id == home_id,
+            McpCustomServerDefinition.server_id == server_id,
+        )
+        return self.db.scalar(stmt)
+
+    def create(
+        self,
+        *,
+        home_id: str,
+        server_id: str,
+        name: str,
+        description: str | None = None,
+        command_tokens: list[str] | None = None,
+        server_path: str | None = None,
+        default_enabled: bool = True,
+        source: str,
+        created_by: str | None = None,
+        metadata_json: dict[str, Any] | None = None,
+    ) -> McpCustomServerDefinition:
+        """Create a new custom MCP server definition."""
+        definition = McpCustomServerDefinition(
+            id=str(uuid.uuid4()),
+            home_id=home_id,
+            server_id=server_id,
+            name=name,
+            description=description,
+            command_tokens=command_tokens or [],
+            server_path=server_path,
+            default_enabled=default_enabled,
+            source=source,
+            created_by=created_by,
+            metadata_json=metadata_json,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.db.add(definition)
+        self.db.commit()
+        self.db.refresh(definition)
+        return definition
+
+    def update(
+        self,
+        definition: McpCustomServerDefinition,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        command_tokens: list[str] | None = None,
+        server_path: str | None = None,
+        default_enabled: bool | None = None,
+        source: str | None = None,
+        metadata_json: dict[str, Any] | None = None,
+    ) -> McpCustomServerDefinition:
+        """Update an existing custom MCP server definition."""
+        if name is not None:
+            definition.name = name
+        if description is not None:
+            definition.description = description
+        if command_tokens is not None:
+            definition.command_tokens = command_tokens
+        if server_path is not None:
+            definition.server_path = server_path
+        if default_enabled is not None:
+            definition.default_enabled = default_enabled
+        if source is not None:
+            definition.source = source
+        if metadata_json is not None:
+            definition.metadata_json = metadata_json
+        definition.updated_at = datetime.now(timezone.utc)
+        self.db.commit()
+        self.db.refresh(definition)
+        return definition
+
+    def delete(self, definition: McpCustomServerDefinition) -> None:
+        """Delete a custom MCP server definition."""
+        self.db.delete(definition)
         self.db.commit()

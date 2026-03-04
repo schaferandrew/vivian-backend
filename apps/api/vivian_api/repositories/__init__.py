@@ -6,6 +6,7 @@ from vivian_api.repositories.chat_repository import (
 )
 from vivian_api.repositories.connection_repository import (
     HomeConnectionRepository,
+    McpCustomServerDefinitionRepository,
     McpServerSettingsRepository,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "ChatRepository",
     "ChatMessageRepository",
     "HomeConnectionRepository",
+    "McpCustomServerDefinitionRepository",
     "McpServerSettingsRepository",
 ]

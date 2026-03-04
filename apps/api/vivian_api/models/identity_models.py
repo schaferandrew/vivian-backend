@@ -54,6 +54,10 @@ class Home(Base):
         back_populates="home",
         cascade="all, delete-orphan",
     )
+    mcp_custom_server_definitions: Mapped[list["McpCustomServerDefinition"]] = relationship(
+        back_populates="home",
+        cascade="all, delete-orphan",
+    )
 
 
 class User(Base):
