@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 import httpx
 import re
@@ -53,7 +53,7 @@ from vivian_api.services.mcp_client import (
 )
 from vivian_api.services.mcp_registry import get_mcp_server_definitions, normalize_enabled_server_ids
 from vivian_api.services.input_guard import sanitize_text_for_llm
-from vivian_mcp.contracts import build_model_tool_specs
+from vivian_mcp.contracts import build_model_tool_specs, validate_tool_input
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -779,9 +779,6 @@ async def _execute_model_tool_call(
     normalized_arguments = _coerce_model_tool_arguments(tool_call.name, tool_call.arguments)
 
     # Validate tool inputs and raise follow-up question if missing required fields
-    from pydantic import ValidationError
-    from vivian_mcp.contracts import validate_tool_input
-
     try:
         validate_tool_input(tool_call.name, normalized_arguments)
     except ValidationError as e:
