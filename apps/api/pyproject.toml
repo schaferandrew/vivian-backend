@@ -16,6 +16,11 @@ dependencies = [
     "psycopg2-binary>=2.9.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "ipython>=8.0.0",
+]
+
 [project.scripts]
 vivian-api = "vivian_api.main:main"
 

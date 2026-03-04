@@ -202,7 +202,7 @@ Notes:
 
 ### Interactive DB Shell (Rails Console Style)
 
-Use the preloaded shell to inspect/update identity tables without typing imports:
+IPython-powered shell with models and helpers preloaded — no imports needed.
 
 ```bash
 db-shell
@@ -214,20 +214,69 @@ Equivalent direct command (without alias):
 docker compose exec api python scripts/db_shell.py
 ```
 
-Preloaded symbols:
-- `db` (SQLAlchemy session)
-- `select` (SQLAlchemy query helper)
-- `User`, `Home`, `HomeMembership`, `AuthSession`
-- `MEMBERSHIP_ROLES`
-- `user_by_email(email)`, `memberships_for_user(user)`
+Add `--sandbox` to explore safely — all changes are rolled back automatically on exit:
 
-Example:
+```bash
+docker compose exec api python scripts/db_shell.py --sandbox
+```
+
+**Preloaded models:** `User`, `Home`, `HomeMembership`, `Chat`, `ChatMessage`, `AuthSession`, `MEMBERSHIP_ROLES`
+
+**Preloaded helpers:**
+
+| Helper | Description |
+|---|---|
+| `user_by_email(email)` | Look up a single user by email |
+| `all_users()` | List all users |
+| `all_homes()` | List all homes |
+| `memberships_for_user(user)` | All `HomeMembership` rows for a user |
+
+**Model relationships (no helpers needed):** `user.memberships`, `user.homes`, `membership.home`, `membership.client`
+
+**Also available:** `db` (SQLAlchemy session), `select` (for building queries)
+
+#### Common commands
 
 ```python
-user = user_by_email("owner@schafer-hause.com")
-membership = memberships_for_user(user)[0]
-membership.role = "owner"
+# List all users
+all_users()
+
+# Find a user
+user = user_by_email("owner@example.com")
+
+# See their home memberships
+memberships_for_user(user)
+
+# See their homes
+homes_for_user(user)
+
+# Change a membership role
+m = memberships_for_user(user)[0]
+m.role = "caretaker"
 db.commit()
+
+# Count chats for a user
+from sqlalchemy import func
+db.scalar(select(func.count()).where(Chat.user_id == user.id))
+
+# List recent chats
+db.scalars(select(Chat).order_by(Chat.updated_at.desc()).limit(10)).all()
+
+# Search chat messages by keyword
+db.scalars(
+    select(ChatMessage)
+    .where(ChatMessage.role == "user")
+    .where(ChatMessage.content.ilike("%expense%"))
+    .order_by(ChatMessage.timestamp.desc())
+    .limit(10)
+).all()
+
+# Raw SQL
+from sqlalchemy import text
+db.execute(text("SELECT count(*) FROM users WHERE status = :s"), {"s": "active"}).scalar()
+
+# Inspect all tables and row counts
+db.execute(text("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")).all()
 ```
 
 ### Using Docker

@@ -45,6 +45,19 @@ class Home(Base):
         back_populates="home",
         cascade="all, delete-orphan",
     )
+    mcp_server_settings: Mapped[list["McpServerSettings"]] = relationship(
+        back_populates="home",
+        cascade="all, delete-orphan",
+    )
+    link_settings: Mapped[list["HomeLinkSetting"]] = relationship(
+        back_populates="home",
+        cascade="all, delete-orphan",
+    )
+    connections: Mapped[list["HomeConnection"]] = relationship(
+        back_populates="home",
+        cascade="all, delete-orphan",
+    )
+
 
 
 class User(Base):
@@ -78,6 +91,14 @@ class User(Base):
         back_populates="client",
         cascade="all, delete-orphan",
     )
+    homes: Mapped[list["Home"]] = relationship(
+        "Home",
+        secondary="home_memberships",
+        primaryjoin="User.id == HomeMembership.client_id",
+        secondaryjoin="HomeMembership.home_id == Home.id",
+        viewonly=True,
+    )
+
 
 
 class HomeMembership(Base):
@@ -124,6 +145,7 @@ class HomeMembership(Base):
 
     home: Mapped[Home] = relationship(back_populates="memberships")
     client: Mapped[User] = relationship(back_populates="memberships")
+
 
 
 # Backward-compatible alias while references migrate from Client -> User.
