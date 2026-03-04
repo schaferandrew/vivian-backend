@@ -178,7 +178,7 @@ async def _execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         }
         raw_result = await charitable_tools.append_donation_to_ledger(
             donation_json=donation_json,
-            drive_file_id="",
+            drive_file_id="cash_donation_no_receipt",
             check_duplicates=True,
             force_append=False,
         )
