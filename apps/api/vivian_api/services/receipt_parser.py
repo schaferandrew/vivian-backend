@@ -2,34 +2,43 @@
 
 import base64
 import json
+import logging
 from pathlib import Path
 from typing import Optional
 
 import httpx
 
 from vivian_api.config import Settings
+from vivian_api.utils import validate_temp_file_path, InvalidFilePathError
 
 
-RECEIPT_PARSING_PROMPT = """You are a receipt parsing assistant. Extract the following information from this medical receipt:
+logger = logging.getLogger(__name__)
+RECEIPT_PARSING_PROMPT = """You are a receipt parsing assistant. Determine whether this receipt is a medical/HSA expense or a charitable donation, then extract the correct fields.
 
-1. Provider: Medical provider or facility name
-2. Service Date: When the service was provided (YYYY-MM-DD format)
-3. Paid Date: When payment was made (YYYY-MM-DD format, often same as service date)
-4. Amount: Total amount paid (numeric only, no $ sign)
-5. HSA Eligible: Whether this appears to be an HSA-eligible medical expense (true/false)
+First, decide the category:
+- "hsa" for medical receipts, prescriptions, doctor visits, or other HSA-eligible expenses
+- "charitable" for donations to organizations, churches, nonprofits, etc.
 
 Return ONLY a JSON object in this exact format:
 {
+    "category": "hsa" | "charitable",
     "provider": "Provider Name",
-    "service_date": "2024-01-15",
-    "paid_date": "2024-01-15",
+    "service_date": "YYYY-MM-DD",
+    "paid_date": "YYYY-MM-DD",
     "amount": 125.00,
-    "hsa_eligible": true
+    "hsa_eligible": true,
+    "organization_name": "Organization Name",
+    "donation_date": "YYYY-MM-DD",
+    "tax_deductible": true,
+    "description": "Optional short note"
 }
 
-If any field is unclear or missing, use null for dates and 0 for amount.
-Be precise with dates - look for service date vs payment date carefully.
-For HSA eligibility: medical services, prescriptions, and doctor visits are typically eligible. Non-medical items like parking, food, or retail are not eligible."""
+Rules:
+- For HSA receipts, fill provider/service_date/paid_date/amount/hsa_eligible and leave charitable fields empty or null.
+- For charitable receipts, fill organization_name/donation_date/amount/tax_deductible/description and leave HSA fields empty or null.
+- If any field is unclear or missing, use null for dates and 0 for amount.
+- Be precise with dates and amounts.
+"""
 
 
 class OpenRouterService:
@@ -49,13 +58,24 @@ class OpenRouterService:
     
     async def parse_receipt(self, pdf_path: str) -> dict:
         """Parse a receipt PDF using OpenRouter vision model."""
-        pdf_file = Path(pdf_path)
-        
-        if not pdf_file.exists():
-            raise FileNotFoundError(f"PDF not found: {pdf_path}")
+        # Validate file path to prevent path traversal attacks
+        try:
+            validated_path = validate_temp_file_path(
+                pdf_path,
+                self.settings.temp_upload_dir
+            )
+        except (InvalidFilePathError, FileNotFoundError) as exc:
+            logger.warning(
+                "File validation failed in receipt parser",
+                extra={"error_type": type(exc).__name__}
+            )
+            return {
+                "success": False,
+                "error": "Invalid or inaccessible file. Please ensure the file was uploaded correctly.",
+            }
         
         # Read PDF and encode as base64
-        with open(pdf_file, "rb") as f:
+        with open(validated_path, "rb") as f:
             pdf_content = f.read()
             pdf_base64 = base64.b64encode(pdf_content).decode("utf-8")
         

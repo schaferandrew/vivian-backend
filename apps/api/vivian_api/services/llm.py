@@ -1,12 +1,26 @@
 """LLM service for OpenRouter and Ollama integration."""
 
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass
+from typing import Any
+
 import httpx
-from vivian_api.config import Settings, get_selected_model, AVAILABLE_MODELS
+
+from vivian_api.config import Settings, get_selected_model, get_available_models, get_ollama_base_url
 
 
-def _is_ollama_model(model_id: str) -> bool:
+logger = logging.getLogger(__name__)
+
+
+async def _is_ollama_model(model_id: str) -> bool:
     """Check if a model ID corresponds to an Ollama model."""
-    for model in AVAILABLE_MODELS:
+    if model_id.startswith("ollama/"):
+        return True
+
+    for model in await get_available_models():
         if model["id"] == model_id:
             return model.get("provider") == "Ollama"
     return False
@@ -28,6 +42,43 @@ class OpenRouterRateLimitError(Exception):
         super().__init__(message)
 
 
+class ModelToolCallingUnsupportedError(Exception):
+    """Raised when the selected model/provider rejects tool-calling payloads."""
+
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
+
+
+@dataclass(frozen=True)
+class LLMToolCall:
+    """Normalized tool call emitted by a model completion."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+    raw_arguments: str
+
+    def as_openai_dict(self) -> dict[str, Any]:
+        """Serialize into OpenAI-compatible tool_call message shape."""
+        return {
+            "id": self.id,
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "arguments": self.raw_arguments or "{}",
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ChatCompletionResult:
+    """Normalized completion payload with optional model tool calls."""
+
+    content: str
+    tool_calls: list[LLMToolCall]
+
+
 async def get_chat_completion(messages: list[dict], web_search_enabled: bool = False) -> str:
     """
     Get chat completion from either OpenRouter or Ollama.
@@ -39,16 +90,133 @@ async def get_chat_completion(messages: list[dict], web_search_enabled: bool = F
     Returns:
         Response text from the LLM
     """
+    result = await get_chat_completion_result(
+        messages,
+        web_search_enabled=web_search_enabled,
+        tools=None,
+    )
+    return result.content
+
+
+def _extract_text_content(content: Any) -> str:
+    """Normalize provider content payloads into plain text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        chunks: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str):
+                    chunks.append(text)
+                elif text is not None:
+                    chunks.append(str(text))
+            elif part is not None:
+                chunks.append(str(part))
+        return "".join(chunks).strip()
+    return str(content)
+
+
+def _parse_tool_arguments(raw_arguments: Any) -> tuple[dict[str, Any], str]:
+    """Parse OpenAI-style tool argument JSON string into a dictionary."""
+    if isinstance(raw_arguments, dict):
+        return raw_arguments, json.dumps(raw_arguments, separators=(",", ":"))
+
+    if not isinstance(raw_arguments, str):
+        return {}, "{}"
+
+    trimmed = raw_arguments.strip()
+    if not trimmed:
+        return {}, "{}"
+
+    try:
+        parsed = json.loads(trimmed)
+    except json.JSONDecodeError:
+        logger.warning("llm.tool_argument_parse_failed raw=%s", trimmed[:300])
+        return {}, "{}"
+
+    if isinstance(parsed, dict):
+        return parsed, trimmed
+
+    logger.warning("llm.tool_argument_not_object raw=%s", trimmed[:300])
+    return {}, "{}"
+
+
+def _parse_tool_calls(raw_message: dict[str, Any]) -> list[LLMToolCall]:
+    """Normalize provider tool_calls payload to internal representation."""
+    raw_tool_calls = raw_message.get("tool_calls")
+    if not isinstance(raw_tool_calls, list):
+        return []
+
+    tool_calls: list[LLMToolCall] = []
+    for index, raw_call in enumerate(raw_tool_calls):
+        if not isinstance(raw_call, dict):
+            continue
+        raw_function = raw_call.get("function")
+        if not isinstance(raw_function, dict):
+            continue
+
+        name = str(raw_function.get("name") or "").strip()
+        if not name:
+            continue
+
+        arguments, raw_arguments = _parse_tool_arguments(raw_function.get("arguments"))
+        call_id = str(raw_call.get("id") or f"tool_call_{index}")
+        tool_calls.append(
+            LLMToolCall(
+                id=call_id,
+                name=name,
+                arguments=arguments,
+                raw_arguments=raw_arguments,
+            )
+        )
+    return tool_calls
+
+
+def _extract_error_message(response: httpx.Response, fallback: str) -> str:
+    """Extract API error message when present."""
+    try:
+        body = response.json()
+    except Exception:
+        return fallback
+    return str((body.get("error") or {}).get("message") or fallback)
+
+
+async def get_chat_completion_result(
+    messages: list[dict[str, Any]],
+    web_search_enabled: bool = False,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | dict[str, Any] | None = "auto",
+) -> ChatCompletionResult:
+    """Get completion text plus optional tool calls for model-driven function execution."""
     model = get_selected_model()
-    
-    if _is_ollama_model(model):
-        return await _get_ollama_completion(messages, model)
-    else:
-        return await _get_openrouter_completion(messages, model, web_search_enabled)
+    if await _is_ollama_model(model):
+        if tools:
+            logger.warning(
+                "llm.tools_requested_with_ollama model=%s tools=%s",
+                model,
+                [tool.get("function", {}).get("name") for tool in tools if isinstance(tool, dict)],
+            )
+        return await _get_ollama_completion_result(messages, model)
+    return await _get_openrouter_completion_result(
+        messages,
+        model,
+        web_search_enabled=web_search_enabled,
+        tools=tools,
+        tool_choice=tool_choice,
+    )
 
 
-async def _get_openrouter_completion(messages: list[dict], model: str, web_search_enabled: bool = False) -> str:
-    """Get chat completion from OpenRouter API."""
+async def _get_openrouter_completion_result(
+    messages: list[dict[str, Any]],
+    model: str,
+    web_search_enabled: bool = False,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: str | dict[str, Any] | None = "auto",
+) -> ChatCompletionResult:
+    """Get completion from OpenRouter with optional tool call output."""
     settings = Settings()
 
     headers = {
@@ -63,66 +231,86 @@ async def _get_openrouter_completion(messages: list[dict], model: str, web_searc
         "messages": messages,
         "plugins": [{"id": "web"}] if web_search_enabled else [{"id": "web", "enabled": False}],
     }
+    if tools:
+        payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
 
     async with httpx.AsyncClient() as client:
-        print(f"OpenRouter URL: {settings.openrouter_base_url}/chat/completions")
-        print(f"Model: {model}")
-        print(f"Plugins: {payload['plugins']}")
-        print(f"Web search enabled: {web_search_enabled}")
-        print(f"API Key (first 10 chars): {settings.openrouter_api_key[:10]}...")
-        
+        logger.info(
+            "llm.openrouter.request model=%s web_search=%s tools=%s",
+            model,
+            web_search_enabled,
+            [tool.get("function", {}).get("name") for tool in tools or [] if isinstance(tool, dict)],
+        )
         response = await client.post(
             f"{settings.openrouter_base_url}/chat/completions",
             headers=headers,
             json=payload,
             timeout=60.0
         )
-        
-        print(f"OpenRouter response status: {response.status_code}")
+        logger.info("llm.openrouter.response_status status=%s model=%s", response.status_code, model)
 
         if response.status_code == 402:
-            try:
-                body = response.json()
-                msg = (
-                    (body.get("error") or {}).get("message")
-                    or "Your account or API key has insufficient credits. Add more credits and retry."
-                )
-            except Exception:
-                msg = "Your account or API key has insufficient credits. Add more credits and retry."
+            msg = _extract_error_message(
+                response,
+                "Your account or API key has insufficient credits. Add more credits and retry.",
+            )
             raise OpenRouterCreditsError(msg)
 
         if response.status_code == 429:
-            try:
-                body = response.json()
-                base_msg = (
-                    (body.get("error") or {}).get("message")
-                    or "Rate limit exceeded"
-                )
-                msg = f"{base_msg} for {model}. Free models have strict rate limits. Try again in a few moments or switch to a paid model."
-            except Exception:
-                msg = f"Rate limit exceeded for {model}. Free models have strict rate limits. Try again in a few moments or switch to a paid model."
+            base_msg = _extract_error_message(response, "Rate limit exceeded")
+            msg = f"{base_msg} for {model}. Free models have strict rate limits. Try again in a few moments or switch to a paid model."
             raise OpenRouterRateLimitError(msg)
 
         if response.status_code == 404:
-            try:
-                body = response.json()
-                msg = (
-                    (body.get("error") or {}).get("message")
-                    or "Model not found or unavailable."
-                )
-            except Exception:
-                msg = "Model not found or unavailable."
+            msg = _extract_error_message(response, "Model not found or unavailable.")
             raise OpenRouterCreditsError(f"Model error: {msg}")
+
+        if response.status_code == 400 and tools:
+            message = _extract_error_message(response, "Bad request")
+            if "tool" in message.lower() or "function" in message.lower():
+                raise ModelToolCallingUnsupportedError(
+                    f"Model rejected tool-calling request: {message}"
+                )
 
         response.raise_for_status()
         data = response.json()
+        raw_message = ((data.get("choices") or [{}])[0].get("message") or {})
+        content = _extract_text_content(raw_message.get("content"))
+        tool_calls = _parse_tool_calls(raw_message)
+        return ChatCompletionResult(content=content, tool_calls=tool_calls)
 
-        return data["choices"][0]["message"]["content"]
+
+class OllamaTimeoutError(Exception):
+    """Raised when Ollama takes too long to respond (model loading or inference)."""
+
+    def __init__(self, model: str, timeout: float):
+        self.model = model
+        self.timeout = timeout
+        super().__init__(
+            f"Ollama timed out after {int(timeout)}s for model '{model}'. "
+            "The model may still be loading — try again in a moment."
+        )
 
 
-async def _get_ollama_completion(messages: list[dict], model: str) -> str:
+class OllamaConnectionError(Exception):
+    """Raised when Ollama is unreachable."""
+
+    def __init__(self, model: str, detail: str = ""):
+        self.model = model
+        msg = f"Could not connect to Ollama for model '{model}'."
+        if detail:
+            msg += f" {detail}"
+        super().__init__(msg)
+
+
+async def _get_ollama_completion_result(
+    messages: list[dict[str, Any]],
+    model: str,
+) -> ChatCompletionResult:
     """Get chat completion from Ollama local API."""
-    ollama_url = Settings.get_ollama_base_url()
+    ollama_url = get_ollama_base_url()
     # Strip "ollama/" prefix if present
     ollama_model = model.replace("ollama/", "")
     
@@ -132,19 +320,31 @@ async def _get_ollama_completion(messages: list[dict], model: str) -> str:
         "stream": False,
     }
     
+    # Ollama can take a long time on first request while loading model into
+    # memory, especially on low-VRAM machines. Use a generous timeout.
+    timeout = httpx.Timeout(300.0, connect=10.0)
+
     async with httpx.AsyncClient() as client:
-        print(f"Ollama URL: {ollama_url}/api/chat")
-        print(f"Ollama Model: {ollama_model}")
+        logger.info("llm.ollama.request model=%s", ollama_model)
         
-        response = await client.post(
-            f"{ollama_url}/api/chat",
-            json=payload,
-            timeout=120.0
-        )
+        try:
+            response = await client.post(
+                f"{ollama_url}/api/chat",
+                json=payload,
+                timeout=timeout,
+            )
+        except httpx.TimeoutException:
+            raise OllamaTimeoutError(ollama_model, timeout.read or 300.0)
+        except httpx.ConnectError:
+            raise OllamaConnectionError(ollama_model, "Is Ollama running?")
         
-        print(f"Ollama response status: {response.status_code}")
+        logger.info("llm.ollama.response_status status=%s model=%s", response.status_code, ollama_model)
         
         response.raise_for_status()
         data = response.json()
-        
-        return data["message"]["content"]
+        raw_message = data.get("message", {}) if isinstance(data, dict) else {}
+        if not isinstance(raw_message, dict):
+            raw_message = {}
+        content = _extract_text_content(raw_message.get("content"))
+        tool_calls = _parse_tool_calls(raw_message)
+        return ChatCompletionResult(content=content, tool_calls=tool_calls)

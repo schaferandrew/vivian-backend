@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from vivian_api.services.receipt_parser import OpenRouterService
 from vivian_api.services.llm import OpenRouterCreditsError
+from vivian_api.services.input_guard import sanitize_text_for_llm
 
 
 class IntentCategory(str, Enum):
@@ -156,7 +157,8 @@ class IntentRouter:
         """Classify user intent using LLM with fallback to patterns."""
         # Try LLM-based classification first
         try:
-            prompt = INTENT_ROUTER_PROMPT.format(user_message=message)
+            sanitized_message = sanitize_text_for_llm(message).text
+            prompt = INTENT_ROUTER_PROMPT.format(user_message=sanitized_message)
             
             response = await self.llm.client.post(
                 "/chat/completions",

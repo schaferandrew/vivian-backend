@@ -16,7 +16,8 @@ Google Drive + Google Sheets
 
 ## Prerequisites
 
-- Python 3.11+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) (manages Python + dependencies)
+- Docker + Docker Compose
 - Google Cloud project with OAuth 2.0 credentials
 - OpenRouter API key
 - Google Drive folders for receipt storage
@@ -38,11 +39,11 @@ Google Drive + Google Sheets
 ### 2. Get Google Refresh Token
 
 ```bash
-# Install Google Auth library
-pip install google-auth-oauthlib
+# Sync MCP server dependencies (includes google-auth-oauthlib)
+uv sync --project apps/mcp-server --locked
 
-# Run this Python script to get refresh token
-python scripts/get_google_token.py
+# Run this script to get refresh token
+uv run --project apps/mcp-server python scripts/get_google_token.py
 ```
 
 ### 3. Create Google Drive Structure
@@ -67,71 +68,68 @@ Get the folder IDs from the URLs and save them.
 ### 5. Environment Configuration
 
 ```bash
-# Copy example env files
-cp apps/api/.env.example apps/api/.env
-cp apps/mcp-server/.env.example apps/mcp-server/.env
+# Copy root env template used by Docker and local commands
+cp .env.example .env
 
-# Edit both files with your credentials
+# Edit .env with your credentials
 ```
 
 ### 6. Install Dependencies
 
 ```bash
-# Create virtual environments
-python -m venv venv
-cd apps/api && python -m venv venv
-cd ../mcp-server && python -m venv venv
-
-# Install dependencies (in each venv)
-pip install -e apps/api
-pip install -e apps/mcp-server
+# Sync project dependencies with uv
+uv sync --project apps/api --extra test --locked
+uv sync --project apps/test-mcp-server --extra test --locked
+uv sync --project apps/mcp-server --locked
 ```
 
 ## Running
 
-### Development
+### Command Quick Reference
+
+Run these from repo root:
 
 ```bash
-# Terminal 1: Start API
-cd apps/api
-source venv/bin/activate
-python -m vivian_api.main
+# Build
+docker build --file apps/api/Dockerfile --tag vivian-api:ci .
 
-# Terminal 2: Test endpoints
-curl http://localhost:8000/health
+# Run app for local testing (foreground)
+docker compose up api
+
+# Health check (in another terminal)
+curl -sS -m 8 http://localhost:8000/health
+
+# Test all tests (API + test MCP server)
+VIVIAN_API_ENCRYPTION_KEY=${VIVIAN_API_ENCRYPTION_KEY:-fEoEtwTZrNYkNLpLM2XXnV1l3e4dnKYGZHso5N86c10=} \
+  uv run --project apps/api --extra test pytest apps/api/tests \
+  && uv run --project apps/test-mcp-server --extra test pytest apps/test-mcp-server/tests
+
+# Test API
+VIVIAN_API_ENCRYPTION_KEY=${VIVIAN_API_ENCRYPTION_KEY:-fEoEtwTZrNYkNLpLM2XXnV1l3e4dnKYGZHso5N86c10=} \
+  uv run --project apps/api --extra test pytest apps/api/tests
+
+# Test MCP
+uv run --project apps/test-mcp-server --extra test pytest apps/test-mcp-server/tests
+
+# Test one API test
+VIVIAN_API_ENCRYPTION_KEY=${VIVIAN_API_ENCRYPTION_KEY:-fEoEtwTZrNYkNLpLM2XXnV1l3e4dnKYGZHso5N86c10=} \
+  uv run --project apps/api --extra test pytest apps/api/tests/test_auth.py::test_login_and_me_success
+
+# Test one MCP test
+uv run --project apps/test-mcp-server --extra test \
+  pytest apps/test-mcp-server/tests/test_addition.py::TestAdditionDeterminism::test_whole_numbers
 ```
 
-### Running Tests
+Important: do not use `uv run pytest` at repo root in this monorepo. Always use `uv run --project ...`.
 
-Tests are organized by app. Currently, MCP server tests are configured.
+Optional aliases (via `.envrc`):
 
-**Option 1: Full path (no activation needed)**
 ```bash
-apps/test-mcp-server/venv/bin/pytest apps/test-mcp-server/tests/ -v
+direnv allow
+test-api
+test-mcp
+test-all
 ```
-
-**Option 2: Activate venv manually**
-```bash
-cd apps/test-mcp-server
-source venv/bin/activate
-pytest tests/ -v
-```
-
-**Option 3: Using .envrc (Recommended)**
-```bash
-# First time only: set up venv
-cd apps/test-mcp-server
-python3 -m venv venv
-source venv/bin/activate
-pip install -e ".[test]"
-
-# Then from project root, use the helper
-source .envrc
-test-mcp  # Runs only MCP tests
-# or
-pytest  # Runs all tests
-```
-
 ### Database Migrations (Alembic)
 
 ```bash
@@ -205,10 +203,10 @@ Notes:
 IPython-powered shell with models and helpers preloaded — no imports needed.
 
 ```bash
-db-shell
+make shell
 ```
 
-Equivalent direct command (without alias):
+Equivalent direct command:
 
 ```bash
 docker compose exec api python scripts/db_shell.py
@@ -217,10 +215,10 @@ docker compose exec api python scripts/db_shell.py
 Add `--sandbox` to explore safely — all changes are rolled back automatically on exit:
 
 ```bash
-docker compose exec api python scripts/db_shell.py --sandbox
+make sandbox
 ```
 
-**Preloaded models:** `User`, `Home`, `HomeMembership`, `Chat`, `ChatMessage`, `AuthSession`, `MEMBERSHIP_ROLES`
+**Preloaded models:** All models auto-discovered — `User`, `Home`, `HomeMembership`, `Chat`, `ChatMessage`, `AuthSession`, `HomeConnection`, `HomeLinkSetting`, `McpServerSettings`
 
 **Preloaded helpers:**
 
@@ -231,7 +229,7 @@ docker compose exec api python scripts/db_shell.py --sandbox
 | `all_homes()` | List all homes |
 | `memberships_for_user(user)` | All `HomeMembership` rows for a user |
 
-**Model relationships (no helpers needed):** `user.memberships`, `user.homes`, `membership.home`, `membership.client`
+**Model relationships (no helpers needed):** `user.memberships`, `user.homes`, `user.auth_sessions`, `membership.home`, `membership.client`, `home.connections`, `home.mcp_settings`, `home.link_settings`
 
 **Also available:** `db` (SQLAlchemy session), `select` (for building queries)
 
@@ -247,13 +245,16 @@ user = user_by_email("owner@example.com")
 # See their home memberships
 memberships_for_user(user)
 
-# See their homes
-homes_for_user(user)
-
-# Change a membership role
-m = memberships_for_user(user)[0]
-m.role = "caretaker"
+# Navigate relationships
+user.homes
+user.memberships[0].role = "caretaker"
 db.commit()
+
+# Home settings
+home = all_homes()[0]
+home.mcp_settings
+home.link_settings
+home.connections
 
 # Count chats for a user
 from sqlalchemy import func
@@ -274,18 +275,54 @@ db.scalars(
 # Raw SQL
 from sqlalchemy import text
 db.execute(text("SELECT count(*) FROM users WHERE status = :s"), {"s": "active"}).scalar()
-
-# Inspect all tables and row counts
-db.execute(text("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")).all()
 ```
+
+### Authentication Configuration
+
+Set these API env vars (`apps/api/.env`):
+
+- `VIVIAN_API_AUTH_JWT_SECRET`: JWT signing secret (required outside local dev)
+- `VIVIAN_API_AUTH_JWT_ALGORITHM`: JWT algorithm (default `HS256`)
+- `VIVIAN_API_AUTH_ACCESS_TOKEN_MINUTES`: access token TTL (default `15`)
+- `VIVIAN_API_AUTH_REFRESH_TOKEN_DAYS`: refresh session TTL (default `30`)
+
+### Authentication Flow
+
+Auth endpoints are under `/api/v1/auth`:
+
+- `POST /auth/login` with `{ email, password }` returns `{ access_token, refresh_token }`
+- `POST /auth/refresh` with `{ refresh_token }` rotates the refresh token and returns a new pair
+- `POST /auth/logout` with `{ refresh_token }` revokes the active refresh session
+- `GET /auth/me` with bearer access token returns user + default home + memberships
+
+Session persistence:
+
+- Refresh sessions are stored in `auth_sessions` with hashed refresh token, expiry, and optional user-agent/IP.
+- Refresh rotation revokes prior refresh token record.
+- Protected routes now include these prefixes: `/api/v1/receipts/*`, `/api/v1/ledger/*`, `/api/v1/mcp/*`, `/api/v1/integrations/*`, `/api/v1/chat/*` (HTTP), and `/api/v1/chats/*`.
+- `owner`/`parent` is required for MCP enabled-server updates (`POST /api/v1/mcp/servers/enabled`).
 
 ### Using Docker
 
 ```bash
-docker-compose up -d
+# 1) Start API + Postgres in foreground (recommended for logs)
+docker compose up api
+
+# 2) In another terminal, verify health
+curl http://localhost:8000/health
+
+# 3) Stop services with Ctrl+C, then clean up
+docker compose down
 ```
 
 ## API Endpoints
+
+### Auth
+
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/refresh`
+- `POST /api/v1/auth/logout`
+- `GET /api/v1/auth/me`
 
 ### Receipts
 

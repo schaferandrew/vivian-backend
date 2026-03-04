@@ -126,7 +126,7 @@ class BulkImportFlow:
                         service_date=parsed_data.get("service_date"),
                         paid_date=parsed_data.get("paid_date"),
                         amount=float(parsed_data.get("amount", 0)),
-                        hsa_eligible=parsed_data.get("hsa_eligible", True)
+                        hsa_eligible=parsed_data.get("hsa_eligible") if parsed_data.get("hsa_eligible") is not None else True
                     )
 
                     if not expense.hsa_eligible:

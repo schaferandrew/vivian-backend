@@ -84,8 +84,18 @@ class SessionContext(BaseModel):
     preferred_import_method: Optional[str] = None
     last_balance_query: Optional[datetime] = None
     last_balance_result: Optional[Dict[str, Any]] = None
+    # Cached balance intent state for follow-up questions.
+    last_balance_query_time: Optional[datetime] = None
+    last_balance_query_result: Optional[Dict[str, Any]] = None
+    # Cached charitable intent state for follow-up questions.
+    last_charitable_query_time: Optional[datetime] = None
+    last_charitable_query_result: Optional[Dict[str, Any]] = None
+    # Last classified intent used for short-turn context handling.
+    last_intent: Optional[str] = None
     web_search_enabled: bool = False  # Web search costs ~$0.02/query, default OFF
     enabled_mcp_servers: List[str] = Field(default_factory=list)
+    pending_follow_up: Optional[Dict[str, Any]] = None  # Deprecated: use pending_follow_ups
+    pending_follow_ups: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ErrorRecoveryState(BaseModel):

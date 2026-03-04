@@ -1,36 +1,71 @@
 """Chat WebSocket router."""
 
-from datetime import datetime, timezone
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 import httpx
 import re
-from datetime import datetime, timezone
 
 from vivian_api.chat.connection import connection_manager
+from vivian_api.chat.document_workflows import (
+    ChatAttachment,
+    DocumentWorkflowArtifact,
+    execute_document_workflows,
+)
 from vivian_api.chat.session import session_manager
 from vivian_api.chat.handler import chat_handler
 from vivian_api.chat.message_protocol import ChatMessage
 from vivian_api.chat.personality import VivianPersonality
-from vivian_api.services.llm import get_chat_completion, OpenRouterCreditsError, OpenRouterRateLimitError
+from vivian_api.services.llm import (
+    get_chat_completion,
+    get_chat_completion_result,
+    LLMToolCall,
+    ModelToolCallingUnsupportedError,
+    OpenRouterCreditsError,
+    OpenRouterRateLimitError,
+    OllamaTimeoutError,
+    OllamaConnectionError,
+)
 from vivian_api.config import (
     AVAILABLE_MODELS,
+    get_available_models,
     DEFAULT_MODEL,
     Settings,
     check_ollama_status,
     get_selected_model,
     set_selected_model,
 )
+from vivian_api.auth.dependencies import CurrentUserContext, get_current_user_context
 from vivian_api.db.database import get_db
+from vivian_api.repositories.connection_repository import McpServerSettingsRepository
 from vivian_api.repositories import ChatMessageRepository, ChatRepository
-from vivian_api.services.mcp_client import MCPClient, MCPClientError
+from vivian_api.services.mcp_client import (
+    MCPClient,
+    MCPClientError,
+    extract_tool_result_payload,
+    extract_tool_result_text,
+)
 from vivian_api.services.mcp_registry import get_mcp_server_definitions, normalize_enabled_server_ids
+from vivian_api.services.input_guard import sanitize_text_for_llm
+from vivian_mcp.contracts import build_model_tool_specs, validate_tool_input
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+logger = logging.getLogger(__name__)
+ENABLED_SERVERS_PREFS_KEY = "__enabled_servers__"
+
+
+class ToolInputMissingError(Exception):
+    """Raised when tool inputs are missing and user follow-up is needed."""
+    def __init__(self, follow_up_question: dict[str, Any]):
+        self.follow_up_question = follow_up_question
+        super().__init__("Missing required tool inputs")
 
 
 class ChatRequest(BaseModel):
@@ -38,7 +73,8 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     chat_id: str | None = None
     web_search_enabled: bool = False
-    enabled_mcp_servers: list[str] = Field(default_factory=list)
+    enabled_mcp_servers: list[str] | None = None
+    attachments: list[ChatAttachment] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -46,6 +82,9 @@ class ChatResponse(BaseModel):
     session_id: str
     chat_id: str
     tools_called: list[dict[str, str]] = Field(default_factory=list)
+    document_workflows: list[DocumentWorkflowArtifact] = Field(default_factory=list)
+    follow_up_question: dict[str, Any] | None = None  # Deprecated: use follow_up_questions
+    follow_up_questions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ModelSelectRequest(BaseModel):
@@ -56,6 +95,31 @@ settings = Settings()
 
 SUMMARY_MODEL_ID = "google/gemini-3-flash-preview"
 SUMMARY_REFINEMENT_MIN_MESSAGES = 4
+MAX_MODEL_TOOL_ROUNDS = 4
+
+MODEL_MCP_TOOL_SPECS: dict[str, dict[str, Any]] = build_model_tool_specs()
+
+
+
+def _build_llm_messages_for_session(*, session, enabled_mcp_servers: list[str]) -> list[dict[str, str]]:
+    """Build LLM message payload with input sanitization for user-controlled content."""
+    messages: list[dict[str, str]] = [
+        {
+            "role": "system",
+            "content": VivianPersonality.get_system_prompt(
+                current_date=datetime.now(timezone.utc).date().isoformat(),
+                user_location=settings.user_location or None,
+                enabled_mcp_servers=enabled_mcp_servers,
+                mcp_tool_guidance=_build_mcp_tool_guidance(enabled_mcp_servers),
+            ),
+        }
+    ]
+
+    for msg in session.messages:
+        processed = sanitize_text_for_llm(msg.get("content", ""))
+        messages.append({"role": msg["role"], "content": processed.text})
+
+    return messages
 
 
 def _normalize_title(raw: str, fallback: str) -> str:
@@ -148,6 +212,1265 @@ def _format_number_for_display(value: float) -> str:
     if float(value).is_integer():
         return str(int(value))
     return format(value, "g")
+
+
+def _get_default_home_id(current_user: CurrentUserContext) -> str:
+    """Get the user's default home ID."""
+    if not current_user.default_membership:
+        raise HTTPException(status_code=400, detail="No home membership found")
+    return current_user.default_membership.home_id
+
+
+def _compact_json(value: object) -> str:
+    """Serialize values for tools_called metadata."""
+    try:
+        return json.dumps(value, separators=(",", ":"), default=str)
+    except Exception:
+        return str(value)
+
+
+def _is_balance_query(message: str) -> bool:
+    """Detect natural language balance queries."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+
+    patterns = (
+        r"\bwhat(?:'s| is)?\s+(?:my\s+)?(?:hsa\s+)?balance\b",
+        r"\bhow much\b.{0,30}\b(?:reimburse|reimbursed|unreimbursed|balance)\b",
+        r"\b(?:hsa\s+)?unreimbursed\b.{0,20}\b(?:amount|balance|total)\b",
+        r"\b(?:available|left)\b.{0,30}\b(?:reimburse|claim)\b",
+        r"\bhow much can i reimburse\b",
+        r"\bbalance check\b",
+    )
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _is_hsa_summary_query(message: str) -> bool:
+    """Detect HSA summary queries that should read ledger summary."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+
+    patterns = (
+        r"\bsummary\b.{0,30}\b(hsa|expense|expenses|ledger)\b",
+        r"\bsummar(?:y|ize)\b.{0,30}\b(hsa|expense|expenses|ledger)\b",
+        r"\b(hsa|ledger)\b.{0,30}\bsummary\b",
+        r"\btotal\b.{0,30}\b(hsa|expenses|reimbursed|unreimbursed)\b",
+    )
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _is_explicit_hsa_tool_request(message: str) -> bool:
+    """Detect explicit request to use HSA tool/server."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "using my hsa tool",
+        "use my hsa tool",
+        "use hsa tool",
+        "hsa_ledger",
+        "hsa ledger tool",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _is_explicit_charitable_tool_request(message: str) -> bool:
+    """Detect explicit request to use charitable tool/server."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "using my charitable tool",
+        "use my charitable tool",
+        "charitable_ledger",
+        "charitable ledger tool",
+        "donation tool",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _is_balance_details_followup(message: str) -> bool:
+    """Detect follow-ups that request balance details."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+
+    patterns = (
+        r"^\s*show(?: me)?\s+(?:the\s+)?(?:details|breakdown|entries|expenses)\s*$",
+        r"^\s*(details|breakdown)\s*$",
+        r"\bshow\b.{0,20}\b(?:details|breakdown|entries|expenses)\b",
+        r"\blist\b.{0,20}\b(?:entries|expenses)\b",
+    )
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _is_flow_closure(message: str) -> bool:
+    """Detect short acknowledgements that should close a lightweight flow."""
+    text = re.sub(r"\s+", " ", (message or "").strip().lower())
+    if not text:
+        return False
+    return bool(
+        re.fullmatch(
+            r"(thanks|thank you|thx|done|all done|that'?s all|no thanks|no thank you)[!.]?",
+            text,
+        )
+    )
+
+
+def _in_recent_balance_context(session) -> bool:
+    """Check if we should treat a message as balance follow-up."""
+    if session.context.last_intent != "balance_query":
+        return False
+
+    ref_time = session.context.last_balance_query_time or session.context.last_balance_query
+    if ref_time is None:
+        return bool(session.context.last_balance_query_result or session.context.last_balance_result)
+
+    return datetime.utcnow() - ref_time <= timedelta(minutes=30)
+
+
+def _record_balance_context(session, result: dict) -> None:
+    """Persist latest balance context for follow-up handling."""
+    now = datetime.utcnow()
+    session.context.last_balance_query = now
+    session.context.last_balance_result = result
+    session.context.last_balance_query_time = now
+    session.context.last_balance_query_result = result
+    session.context.last_intent = "balance_query"
+
+
+async def _create_chat_mcp_client(
+    *,
+    mcp_server_id: str,
+    db: Session,
+    home_id: str,
+) -> MCPClient:
+    """Create MCP client for chat path using DB-backed configuration."""
+    definitions = get_mcp_server_definitions(settings)
+    definition = definitions.get(mcp_server_id)
+    if not definition:
+        raise ValueError(f"Unknown MCP server: {mcp_server_id}")
+
+    return await MCPClient.from_db(
+        server_command=definition.command,
+        home_id=home_id,
+        mcp_server_id=mcp_server_id,
+        db=db,
+        server_path_override=definition.server_path,
+    )
+
+
+def _resolve_enabled_mcp_servers_for_chat(
+    *,
+    requested_ids: list[str] | None,
+    current_user: CurrentUserContext,
+    db: Session,
+) -> list[str]:
+    """Resolve effective enabled MCP servers (chat override -> persisted defaults)."""
+    if requested_ids is not None:
+        return normalize_enabled_server_ids(requested_ids, settings)
+
+    home_id = _get_default_home_id(current_user)
+    settings_repo = McpServerSettingsRepository(db)
+    prefs = settings_repo.get_by_home_and_server(home_id, ENABLED_SERVERS_PREFS_KEY)
+    if prefs:
+        raw_ids = prefs.settings_json.get("enabled_server_ids")
+        if isinstance(raw_ids, list):
+            return normalize_enabled_server_ids([str(server_id) for server_id in raw_ids], settings)
+    return normalize_enabled_server_ids(None, settings)
+
+
+def _build_mcp_tool_guidance(enabled_servers: list[str]) -> list[str]:
+    """Build concise tool guidance for the model from MCP registry metadata."""
+    definitions = get_mcp_server_definitions(settings)
+    guidance: list[str] = []
+    for server_id in enabled_servers:
+        definition = definitions.get(server_id)
+        if not definition:
+            continue
+        guidance.append(
+            f"{server_id} tools available: {', '.join(definition.tools)}"
+        )
+        if server_id == "hsa_ledger":
+            guidance.append(
+                "For HSA summaries, use read_ledger_entries(year?, status_filter?, limit?, column_filters?). "
+                "column_filters items use {column, operator, value, case_sensitive?}."
+            )
+        if server_id == "charitable_ledger":
+            guidance.append(
+                "For charitable totals, use get_charitable_summary(tax_year?, column_filters?). "
+                "For filtered donation lists/details, use read_charitable_ledger_entries("
+                "tax_year?, organization?, tax_deductible?, limit?, column_filters?). "
+                "To log a donation without a receipt (user provides org, amount, date manually), "
+                "use log_charitable_donation(organization, amount, date, tax_deductible?, description?). "
+                "column_filters items use {column, operator, value, case_sensitive?}."
+            )
+    return guidance
+
+
+def _build_model_tool_schema(enabled_servers: list[str]) -> list[dict[str, Any]]:
+    """Build model-facing function schemas for enabled read/query MCP tools."""
+    tool_schema: list[dict[str, Any]] = []
+    for tool_name, spec in MODEL_MCP_TOOL_SPECS.items():
+        # Always include meta_tools (special tools that don't require MCP servers)
+        is_meta_tool = spec["server_id"] == "meta_tools"
+        if not is_meta_tool and spec["server_id"] not in enabled_servers:
+            continue
+        tool_schema.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": spec["description"],
+                    "parameters": spec["parameters"],
+                },
+            }
+        )
+    return tool_schema
+
+
+def _extract_mcp_result_text(result: dict[str, Any]) -> str:
+    """Extract text payload from an MCP call_tool response."""
+    payload = extract_tool_result_payload(result)
+    if isinstance(payload, dict):
+        return _compact_json(payload)
+    return extract_tool_result_text(result)
+
+
+def _coerce_model_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Normalize tool arguments from model outputs to match MCP tool schemas."""
+    if tool_name == "get_unreimbursed_balance":
+        return {}
+
+    if tool_name == "read_ledger_entries":
+        normalized: dict[str, Any] = {}
+        year = arguments.get("year")
+        if isinstance(year, str) and year.strip().isdigit():
+            normalized["year"] = int(year.strip())
+        elif isinstance(year, int):
+            normalized["year"] = year
+
+        status = arguments.get("status_filter")
+        if isinstance(status, str) and status.strip():
+            normalized["status_filter"] = status.strip()
+
+        limit = arguments.get("limit")
+        if isinstance(limit, str) and limit.strip().isdigit():
+            normalized["limit"] = int(limit.strip())
+        elif isinstance(limit, (int, float)):
+            normalized["limit"] = int(limit)
+
+        column_filters = arguments.get("column_filters")
+        if isinstance(column_filters, list):
+            normalized["column_filters"] = column_filters
+        return normalized
+
+    if tool_name == "get_charitable_summary":
+        normalized = {}
+        tax_year = arguments.get("tax_year")
+        if isinstance(tax_year, int):
+            normalized["tax_year"] = str(tax_year)
+        elif isinstance(tax_year, str) and tax_year.strip():
+            normalized["tax_year"] = tax_year.strip()
+
+        column_filters = arguments.get("column_filters")
+        if isinstance(column_filters, list):
+            normalized["column_filters"] = column_filters
+        return normalized
+
+    if tool_name == "read_charitable_ledger_entries":
+        normalized: dict[str, Any] = {}
+        tax_year = arguments.get("tax_year")
+        if isinstance(tax_year, int):
+            normalized["tax_year"] = str(tax_year)
+        elif isinstance(tax_year, str) and tax_year.strip():
+            normalized["tax_year"] = tax_year.strip()
+
+        organization = arguments.get("organization")
+        if isinstance(organization, str) and organization.strip():
+            normalized["organization"] = organization.strip()
+
+        tax_deductible = arguments.get("tax_deductible")
+        if isinstance(tax_deductible, bool):
+            normalized["tax_deductible"] = tax_deductible
+        elif isinstance(tax_deductible, str):
+            lowered = tax_deductible.strip().lower()
+            if lowered in {"true", "1", "yes", "y"}:
+                normalized["tax_deductible"] = True
+            elif lowered in {"false", "0", "no", "n"}:
+                normalized["tax_deductible"] = False
+
+        limit = arguments.get("limit")
+        if isinstance(limit, str) and limit.strip().isdigit():
+            normalized["limit"] = int(limit.strip())
+        elif isinstance(limit, (int, float)):
+            normalized["limit"] = int(limit)
+
+        column_filters = arguments.get("column_filters")
+        if isinstance(column_filters, list):
+            normalized["column_filters"] = column_filters
+        return normalized
+
+    if tool_name == "log_charitable_donation":
+        normalized: dict[str, Any] = {}
+        if org := arguments.get("organization"):
+            normalized["organization"] = str(org).strip()
+        if amt := arguments.get("amount"):
+            try:
+                normalized["amount"] = float(str(amt).strip().lstrip("$").replace(",", ""))
+            except ValueError:
+                pass
+        if dt := arguments.get("date"):
+            normalized["date"] = str(dt).strip()
+        if "tax_deductible" in arguments:
+            val = arguments["tax_deductible"]
+            if isinstance(val, bool):
+                normalized["tax_deductible"] = val
+            elif isinstance(val, str):
+                normalized["tax_deductible"] = val.lower() in {"true", "yes", "1"}
+        if desc := arguments.get("description"):
+            normalized["description"] = str(desc).strip()
+        return normalized
+
+    return arguments
+
+
+def _extract_field_metadata_from_schema(
+    parameter_schema: dict[str, Any],
+    missing_field_names: list[str],
+) -> list[dict[str, Any]]:
+    """Extract field metadata from JSON schema for follow-up question UI."""
+
+    properties = parameter_schema.get("properties", {})
+    required_fields = set(parameter_schema.get("required", []))
+
+    fields = []
+    for field_name in missing_field_names:
+        if field_name not in properties:
+            continue
+
+        field_schema = properties[field_name]
+
+        # Determine field type from JSON schema
+        json_type = field_schema.get("type", "string")
+        field_type = "text"
+        if json_type in ("number", "integer"):
+            field_type = "number"
+        elif "date" in field_name.lower() or "year" in field_name.lower():
+            field_type = "date"
+
+        # Generate user-friendly label
+        label = field_schema.get("title") or field_name.replace("_", " ").title()
+
+        fields.append({
+            "key": field_name,
+            "label": label,
+            "type": field_type,
+            "required": field_name in required_fields,
+            "placeholder": field_schema.get("description"),
+        })
+
+    return fields
+
+
+def _build_follow_up_question(
+    tool_call: LLMToolCall,
+    validation_error: Any,
+    spec: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build FollowUpQuestion object from validation error."""
+
+    # Extract missing field names from Pydantic ValidationError
+    missing_fields = []
+    for error in validation_error.errors():
+        if error["type"] == "missing":
+            field_name = error["loc"][0] if error["loc"] else None
+            if field_name and isinstance(field_name, str):
+                missing_fields.append(field_name)
+
+    if not missing_fields:
+        # Validation failed for other reasons (type mismatch, etc.)
+        return None
+
+    # Extract field metadata from tool's parameter schema
+    parameter_schema = spec.get("parameters", {})
+    fields = _extract_field_metadata_from_schema(parameter_schema, missing_fields)
+
+    # Generate contextual prompt
+    tool_name = tool_call.name
+    field_labels = ", ".join(f.get("label", f["key"]) for f in fields)
+    prompt = f"Please provide the following details to use {tool_name}: {field_labels}"
+
+    return {
+        "id": f"followup_{tool_call.id}",
+        "kind": "missing_tool_fields",
+        "server_id": spec["server_id"],
+        "tool_name": tool_call.name,
+        "prompt": prompt,
+        "missing_fields": missing_fields,
+        "fields": fields,
+        "suggested_values": {},  # Can be enhanced later
+    }
+
+
+def _build_follow_up_from_meta_tool(tool_call: LLMToolCall) -> dict[str, Any]:
+    """Build FollowUpQuestion object from ask_follow_up_question tool call."""
+
+    arguments = tool_call.arguments
+    questions_data = arguments.get("questions", [])
+    context = arguments.get("context")
+
+    # Build fields array from questions
+    fields = []
+    for idx, q in enumerate(questions_data):
+        # Handle both string questions and dict questions
+        if isinstance(q, str):
+            # LLM passed a simple string question - create a text field
+            field = {
+                "key": f"answer_{idx}",
+                "label": q,
+                "type": "text",
+                "required": True,
+                "placeholder": None,
+            }
+        elif isinstance(q, dict):
+            # LLM passed a proper question object
+            field = {
+                "key": q.get("key", f"field_{len(fields)}"),
+                "label": q.get("question", ""),
+                "type": q.get("type", "text"),
+                "required": q.get("required", True),
+                "placeholder": q.get("placeholder"),
+            }
+
+            # Add options if it's a select/multiselect question
+            if "options" in q and q["options"]:
+                field["options"] = q["options"]
+        else:
+            # Skip invalid entries
+            logger.warning("chat.message INVALID_QUESTION_FORMAT q=%s", q)
+            continue
+
+        fields.append(field)
+
+    # Use context as prompt, or generate one
+    prompt = context or "Please provide the following information:"
+
+    follow_up = {
+        "id": f"followup_{tool_call.id}",
+        "kind": "proactive_clarification",
+        "server_id": "meta_tools",
+        "tool_name": "ask_follow_up_question",
+        "prompt": prompt,
+        "missing_fields": [f["key"] for f in fields],
+        "fields": fields,
+        "suggested_values": {},
+    }
+
+    return follow_up
+
+
+def _parse_tool_result_payload(raw_text: str) -> dict[str, Any] | None:
+    """Best-effort parse of tool result text as JSON object."""
+    try:
+        parsed = json.loads(raw_text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _tool_output_for_metadata(raw_text: str) -> str:
+    """Compact tool output for metadata persistence."""
+    parsed = _parse_tool_result_payload(raw_text)
+    if parsed is not None:
+        return _compact_json(parsed)
+    return raw_text
+
+
+def _record_context_from_model_tool_result(session, tool_name: str, raw_text: str) -> None:
+    """Update session context using model tool call results for follow-up handling."""
+    payload = _parse_tool_result_payload(raw_text)
+    if payload is None:
+        return
+
+    if tool_name == "get_unreimbursed_balance":
+        if "total_unreimbursed" in payload:
+            _record_balance_context(session, payload)
+        return
+
+    if tool_name == "read_ledger_entries":
+        if payload.get("success"):
+            _record_balance_context(
+                session,
+                {"summary": payload.get("summary", {}), "mode": "summary"},
+            )
+        return
+
+    if tool_name == "get_charitable_summary" and payload.get("success"):
+        _record_charitable_context(session, payload)
+        return
+
+    if tool_name == "read_charitable_ledger_entries" and payload.get("success"):
+        summary_payload = payload.get("summary")
+        if isinstance(summary_payload, dict):
+            _record_charitable_context(
+                session,
+                {
+                    "success": True,
+                    "tax_year": payload.get("tax_year"),
+                    "total": summary_payload.get("total_amount", 0),
+                    "tax_deductible_total": summary_payload.get("tax_deductible_total", 0),
+                    "by_organization": summary_payload.get("by_organization", {}),
+                    "by_year": summary_payload.get("by_year", {}),
+                },
+            )
+        else:
+            _record_charitable_context(session, payload)
+
+
+async def _execute_model_tool_call(
+    *,
+    tool_call: LLMToolCall,
+    current_user: CurrentUserContext,
+    db: Session,
+    enabled_mcp_servers: list[str],
+    mcp_clients: dict[str, MCPClient],
+) -> tuple[str, dict[str, str]]:
+    """Execute one model-emitted tool call against the mapped MCP server."""
+    spec = MODEL_MCP_TOOL_SPECS.get(tool_call.name)
+    if not spec:
+        error_text = json.dumps({"success": False, "error": f"Unknown tool '{tool_call.name}'."})
+        return (
+            error_text,
+            {
+                "server_id": "unknown",
+                "tool_name": tool_call.name,
+                "input": _compact_json(tool_call.arguments),
+                "output": error_text,
+            },
+        )
+
+    server_id = str(spec["server_id"])
+
+    # Special handling for ask_follow_up_question tool (meta tool, doesn't call MCP server)
+    if tool_call.name == "ask_follow_up_question":
+        follow_up = _build_follow_up_from_meta_tool(tool_call)
+        raise ToolInputMissingError(follow_up)
+
+    if server_id not in enabled_mcp_servers:
+        error_text = json.dumps(
+            {
+                "success": False,
+                "error": f"MCP server '{server_id}' is not enabled for this chat.",
+            }
+        )
+        return (
+            error_text,
+            {
+                "server_id": server_id,
+                "tool_name": tool_call.name,
+                "input": _compact_json(tool_call.arguments),
+                "output": error_text,
+            },
+        )
+
+    normalized_arguments = _coerce_model_tool_arguments(tool_call.name, tool_call.arguments)
+
+    # Validate tool inputs and raise follow-up question if missing required fields
+    try:
+        validate_tool_input(tool_call.name, normalized_arguments)
+    except ValidationError as e:
+        follow_up = _build_follow_up_question(tool_call, e, spec)
+        if follow_up:
+            # Raise custom exception to signal missing inputs
+            raise ToolInputMissingError(follow_up)
+        # Fall through to normal error handling if no follow-up
+
+    try:
+        client = mcp_clients.get(server_id)
+        if client is None:
+            home_id = _get_default_home_id(current_user)
+            client = await _create_chat_mcp_client(
+                mcp_server_id=server_id,
+                db=db,
+                home_id=home_id,
+            )
+            await client.start()
+            mcp_clients[server_id] = client
+
+        result = await client.call_tool(tool_call.name, normalized_arguments)
+        raw_text = _extract_mcp_result_text(result)
+        return (
+            raw_text,
+            {
+                "server_id": server_id,
+                "tool_name": tool_call.name,
+                "input": _compact_json(normalized_arguments),
+                "output": _tool_output_for_metadata(raw_text),
+            },
+        )
+    except Exception as exc:
+        error_text = json.dumps(
+            {
+                "success": False,
+                "error": str(exc),
+                "tool": tool_call.name,
+            }
+        )
+        return (
+            error_text,
+            {
+                "server_id": server_id,
+                "tool_name": tool_call.name,
+                "input": _compact_json(normalized_arguments),
+                "output": error_text,
+            },
+        )
+
+
+async def _run_model_tool_loop(
+    *,
+    base_messages: list[dict[str, Any]],
+    web_search_enabled: bool,
+    session,
+    current_user: CurrentUserContext,
+    db: Session,
+    enabled_mcp_servers: list[str],
+) -> tuple[str, list[dict[str, str]]]:
+    """Run model tool-calling loop: model -> tool_calls -> MCP -> model final response."""
+    tools = _build_model_tool_schema(enabled_mcp_servers)
+    if not tools:
+        response_text = await get_chat_completion(
+            base_messages,
+            web_search_enabled=web_search_enabled,
+        )
+        return response_text, []
+
+    messages = [dict(message) for message in base_messages]
+    tools_called: list[dict[str, str]] = []
+    mcp_clients: dict[str, MCPClient] = {}
+    try:
+        for round_idx in range(1, MAX_MODEL_TOOL_ROUNDS + 1):
+            completion = await get_chat_completion_result(
+                messages,
+                web_search_enabled=web_search_enabled,
+                tools=tools,
+                tool_choice="auto",
+            )
+            assistant_message: dict[str, Any] = {
+                "role": "assistant",
+                "content": completion.content or "",
+            }
+            if completion.tool_calls:
+                assistant_message["tool_calls"] = [
+                    tool_call.as_openai_dict() for tool_call in completion.tool_calls
+                ]
+            messages.append(assistant_message)
+            logger.warning(
+                "chat.message model_tool_round=%s tool_calls=%s",
+                round_idx,
+                [tool_call.name for tool_call in completion.tool_calls],
+            )
+
+            if not completion.tool_calls:
+                final_response = (completion.content or "").strip()
+                if final_response:
+                    return final_response, tools_called
+                break
+
+            for tool_call in completion.tool_calls:
+                try:
+                    raw_tool_output, call_metadata = await _execute_model_tool_call(
+                        tool_call=tool_call,
+                        current_user=current_user,
+                        db=db,
+                        enabled_mcp_servers=enabled_mcp_servers,
+                        mcp_clients=mcp_clients,
+                    )
+                    tools_called.append(call_metadata)
+                    _record_context_from_model_tool_result(session, tool_call.name, raw_tool_output)
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": tool_call.name,
+                            "content": raw_tool_output,
+                        }
+                    )
+                    logger.warning(
+                        "chat.message tool_executed name=%s server_id=%s",
+                        tool_call.name,
+                        call_metadata.get("server_id"),
+                    )
+                except ToolInputMissingError as e:
+                    # Append follow-up question to session context
+                    session.context.pending_follow_ups.append(e.follow_up_question)
+
+                    # Also set singular for backward compatibility
+                    if not session.context.pending_follow_up:
+                        session.context.pending_follow_up = e.follow_up_question
+
+                    return ("I need a few more details to complete that.", tools_called)
+
+        return (
+            "I reached the tool-calling limit before finishing this request. Please ask again with the same details.",
+            tools_called,
+        )
+    finally:
+        for client in mcp_clients.values():
+            try:
+                await client.stop()
+            except Exception:
+                logger.exception("chat.message failed_stopping_mcp_client")
+
+
+def _is_charitable_query(message: str) -> bool:
+    """Detect charitable summary/list natural-language queries."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    patterns = (
+        r"\b(total|sum)\b.{0,25}\b(giving|donation|donated|charitable)\b",
+        r"\bhow much\b.{0,25}\b(donat|giving|charit)\b",
+        r"\bsummary\b.{0,30}\b(charitable|giving|donation)\b",
+        r"\blist\b.{0,25}\b(organizations|charities|donations)\b",
+        r"\bwho\b.{0,25}\b(donated|given)\b",
+        r"\bcharitable\b.{0,20}\b(summary|total|organizations)\b",
+    )
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _is_charitable_orgs_followup(message: str) -> bool:
+    """Detect org-list follow-ups in a charitable flow."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    patterns = (
+        r"^\s*(show|list)\s+(?:the\s+)?(?:organizations|charities)\s*$",
+        r"^\s*organizations\s*$",
+        r"\bwhich\b.{0,20}\b(organizations|charities)\b",
+    )
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _has_complex_charitable_filter_request(message: str) -> bool:
+    """Detect charitable queries that likely need richer tool filters than deterministic routing."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    patterns = (
+        r"\bto\s+(?!date\b)[a-z0-9][^,.!?]{1,60}",
+        r"\b(only|except|excluding|include|between|over|under|greater than|less than|at least|at most)\b",
+        r"\b(tax[- ]?deductible|non[- ]?deductible)\b",
+    )
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _extract_tax_year(message: str) -> str | None:
+    """Extract a 4-digit tax year if present."""
+    match = re.search(r"\b(20\d{2})\b", message or "")
+    if not match:
+        return None
+    year = match.group(1)
+    return year if 2000 <= int(year) <= 2100 else None
+
+
+def _is_year_only_message(message: str) -> bool:
+    """Detect messages that only provide a year."""
+    return bool(re.fullmatch(r"\s*20\d{2}\s*", message or ""))
+
+
+def _is_dual_summary_query(message: str) -> bool:
+    """Detect requests that ask for both HSA and charitable summaries."""
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+
+    has_hsa = "hsa" in text
+    has_charitable = any(token in text for token in ("charitable", "donation", "giving"))
+    has_both = "both" in text
+
+    if has_hsa and has_charitable:
+        return True
+    if has_both and (has_hsa or has_charitable):
+        return True
+
+    patterns = (
+        r"\bboth\b.{0,30}\b(summary|summaries|totals|breakdown)\b",
+        r"\bgive me both\b",
+    )
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _is_dual_summary_followup(message: str, session) -> bool:
+    """Detect shorthand follow-up like 'both' while in HSA/charitable context."""
+    text = re.sub(r"\s+", " ", (message or "").strip().lower())
+    if not text:
+        return False
+    if text not in {"both", "give me both", "both please"}:
+        return False
+    return session.context.last_intent in {"balance_query", "charitable_query"}
+
+
+def _in_recent_charitable_context(session) -> bool:
+    """Check if we should treat a message as charitable follow-up."""
+    if session.context.last_intent != "charitable_query":
+        return False
+    ref_time = session.context.last_charitable_query_time
+    if ref_time is None:
+        return bool(session.context.last_charitable_query_result)
+    return datetime.utcnow() - ref_time <= timedelta(minutes=30)
+
+
+def _record_charitable_context(session, result: dict) -> None:
+    """Persist charitable query result for follow-ups."""
+    now = datetime.utcnow()
+    session.context.last_charitable_query_time = now
+    session.context.last_charitable_query_result = result
+    session.context.last_intent = "charitable_query"
+
+
+def _format_charitable_response(summary: dict, include_orgs: bool) -> str:
+    """Render charitable totals and optional organization list."""
+    tax_year = summary.get("tax_year")
+    total = float(summary.get("total", 0) or 0)
+    deductible = float(summary.get("tax_deductible_total", 0) or 0)
+    scope = f"for {tax_year}" if tax_year else "across all available years"
+    lines = [
+        f"Your total charitable giving {scope} is **${total:.2f}**.",
+        f"Tax-deductible total: **${deductible:.2f}**.",
+    ]
+    if include_orgs:
+        by_org = summary.get("by_organization", {}) or {}
+        if isinstance(by_org, dict) and by_org:
+            lines.append("")
+            lines.append("Organizations:")
+            for name, data in sorted(by_org.items(), key=lambda item: float((item[1] or {}).get("total", 0)), reverse=True):
+                amount = float((data or {}).get("total", 0) or 0)
+                lines.append(f"• **{name}**: ${amount:.2f}")
+        else:
+            lines.append("")
+            lines.append("No organization-level donation rows were found for that scope.")
+    else:
+        lines.append("")
+        lines.append("If you want, ask me to list organizations for a breakdown.")
+    return "\n".join(lines)
+
+
+def _context_tax_year(session) -> str | None:
+    """Read latest known charitable tax year from session context."""
+    result = session.context.last_charitable_query_result or {}
+    if not isinstance(result, dict):
+        return None
+    tax_year = result.get("tax_year")
+    if isinstance(tax_year, str) and re.fullmatch(r"20\d{2}", tax_year):
+        return tax_year
+    return None
+
+
+async def _try_dual_summary_tool_response(
+    *,
+    message: str,
+    session,
+    current_user: CurrentUserContext,
+    db: Session,
+    enabled_mcp_servers: list[str],
+) -> tuple[str, list[dict[str, str]]] | None:
+    """Handle requests that need both HSA and charitable summaries."""
+    if not (_is_dual_summary_query(message) or _is_dual_summary_followup(message, session)):
+        return None
+
+    missing = [
+        server_id
+        for server_id in ("hsa_ledger", "charitable_ledger")
+        if server_id not in enabled_mcp_servers
+    ]
+    if missing:
+        return (
+            f"I can fetch both once these MCP servers are enabled: {', '.join(missing)}.",
+            [],
+        )
+
+    tax_year = _extract_tax_year(message) or _context_tax_year(session)
+    home_id = _get_default_home_id(current_user)
+    tools_called: list[dict[str, str]] = []
+    hsa_summary: dict | None = None
+    charitable_summary: dict | None = None
+    hsa_error: str | None = None
+    charitable_error: str | None = None
+
+    try:
+        hsa_client = await _create_chat_mcp_client(
+            mcp_server_id="hsa_ledger",
+            db=db,
+            home_id=home_id,
+        )
+        await hsa_client.start()
+        try:
+            hsa_args: dict[str, object] = {"limit": 1000}
+            if tax_year:
+                hsa_args["year"] = int(tax_year)
+            hsa_result = await hsa_client.call_tool("read_ledger_entries", hsa_args)
+            hsa_data = extract_tool_result_payload(hsa_result) or {}
+            if not isinstance(hsa_data, dict):
+                hsa_data = {}
+            tools_called.append(
+                {
+                    "server_id": "hsa_ledger",
+                    "tool_name": "read_ledger_entries",
+                    "input": _compact_json(hsa_args),
+                    "output": _compact_json(hsa_data),
+                }
+            )
+            if hsa_data.get("success"):
+                hsa_summary = hsa_data.get("summary", {})
+                _record_balance_context(session, {"summary": hsa_summary, "mode": "summary"})
+            else:
+                hsa_error = str(hsa_data.get("error", "unknown error"))
+        finally:
+            await hsa_client.stop()
+    except Exception as exc:
+        hsa_error = str(exc)
+
+    try:
+        charitable_client = await _create_chat_mcp_client(
+            mcp_server_id="charitable_ledger",
+            db=db,
+            home_id=home_id,
+        )
+        await charitable_client.start()
+        try:
+            charitable_args = {"tax_year": tax_year} if tax_year else {}
+            charitable_result = await charitable_client.call_tool("get_charitable_summary", charitable_args)
+            charitable_data = extract_tool_result_payload(charitable_result) or {}
+            if not isinstance(charitable_data, dict):
+                charitable_data = {}
+            tools_called.append(
+                {
+                    "server_id": "charitable_ledger",
+                    "tool_name": "get_charitable_summary",
+                    "input": _compact_json(charitable_args),
+                    "output": _compact_json(charitable_data),
+                }
+            )
+            if charitable_data.get("success"):
+                charitable_summary = charitable_data
+                _record_charitable_context(session, charitable_data)
+            else:
+                charitable_error = str(charitable_data.get("error", "unknown error"))
+        finally:
+            await charitable_client.stop()
+    except Exception as exc:
+        charitable_error = str(exc)
+
+    sections: list[str] = []
+    if hsa_summary is not None:
+        total_amount = float(hsa_summary.get("total_amount", 0) or 0)
+        reimbursed = float(hsa_summary.get("total_reimbursed", 0) or 0)
+        unreimbursed = float(hsa_summary.get("total_unreimbursed", 0) or 0)
+        sections.append(
+            "HSA summary:\n"
+            f"• Total logged: **${total_amount:.2f}**\n"
+            f"• Reimbursed: **${reimbursed:.2f}**\n"
+            f"• Unreimbursed: **${unreimbursed:.2f}**"
+        )
+    elif hsa_error:
+        sections.append(f"HSA summary unavailable: {hsa_error}")
+
+    if charitable_summary is not None:
+        total = float(charitable_summary.get("total", 0) or 0)
+        deductible = float(charitable_summary.get("tax_deductible_total", 0) or 0)
+        scope = f"for {charitable_summary.get('tax_year')}" if charitable_summary.get("tax_year") else "across all years"
+        sections.append(
+            "Charitable summary:\n"
+            f"• Total giving {scope}: **${total:.2f}**\n"
+            f"• Tax-deductible: **${deductible:.2f}**"
+        )
+    elif charitable_error:
+        sections.append(f"Charitable summary unavailable: {charitable_error}")
+
+    if not sections:
+        return ("I couldn't fetch either summary right now. Please try again.", tools_called)
+    return ("\n\n".join(sections), tools_called)
+
+
+def _format_balance_details_response(summary_data: dict) -> str:
+    """Render a concise balance-details response."""
+    total_entries = int(summary_data.get("total_entries", 0) or 0)
+    total_amount = float(summary_data.get("total_amount", 0) or 0)
+    unreimbursed = float(summary_data.get("total_unreimbursed", 0) or 0)
+    reimbursed = float(summary_data.get("total_reimbursed", 0) or 0)
+    not_eligible = float(summary_data.get("total_not_eligible", 0) or 0)
+    count_unreimbursed = int(summary_data.get("count_unreimbursed", 0) or 0)
+
+    return (
+        "Here are your HSA ledger details:\n\n"
+        f"• Total entries: **{total_entries}**\n"
+        f"• Total tracked: **${total_amount:.2f}**\n"
+        f"• Unreimbursed: **${unreimbursed:.2f}** ({count_unreimbursed} expense(s))\n"
+        f"• Reimbursed: **${reimbursed:.2f}**\n"
+        f"• Not HSA-eligible: **${not_eligible:.2f}**\n\n"
+        "If you want, I can also filter this by year or reimbursement status."
+    )
+
+
+def _format_hsa_summary_response(summary_data: dict) -> str:
+    """Render a concise HSA summary response."""
+    total_entries = int(summary_data.get("total_entries", 0) or 0)
+    total_amount = float(summary_data.get("total_amount", 0) or 0)
+    unreimbursed = float(summary_data.get("total_unreimbursed", 0) or 0)
+    reimbursed = float(summary_data.get("total_reimbursed", 0) or 0)
+    not_eligible = float(summary_data.get("total_not_eligible", 0) or 0)
+    return (
+        "Here is your HSA expense summary:\n\n"
+        f"• Total logged expenses: **${total_amount:.2f}** ({total_entries} entries)\n"
+        f"• Total reimbursed: **${reimbursed:.2f}**\n"
+        f"• Total unreimbursed: **${unreimbursed:.2f}**\n"
+        f"• Not HSA-eligible: **${not_eligible:.2f}**\n\n"
+        "If you want, I can also list the recent transactions."
+    )
+
+
+async def _try_balance_tool_response(
+    *,
+    message: str,
+    session,
+    current_user: CurrentUserContext,
+    db: Session,
+    enabled_mcp_servers: list[str],
+) -> tuple[str, list[dict[str, str]]] | None:
+    """Handle balance queries + follow-ups with deterministic MCP tool routing."""
+    has_balance_context = _in_recent_balance_context(session)
+    is_balance_query = _is_balance_query(message)
+    is_hsa_summary_query = _is_hsa_summary_query(message)
+    is_explicit_tool_request = _is_explicit_hsa_tool_request(message)
+    is_details_followup = _is_balance_details_followup(message)
+    is_closure = _is_flow_closure(message)
+
+    if has_balance_context and is_closure:
+        session.context.last_intent = None
+        return ("Sounds good. Reach out anytime if you want to review your HSA numbers again.", [])
+
+    should_handle_summary = is_hsa_summary_query or is_explicit_tool_request
+    if not is_balance_query and not should_handle_summary and not (has_balance_context and is_details_followup):
+        if has_balance_context:
+            session.context.last_intent = None
+        return None
+
+    if "hsa_ledger" not in enabled_mcp_servers:
+        return (
+            "I can check that once your HSA Ledger MCP server is enabled in settings.",
+            [],
+        )
+
+    home_id = _get_default_home_id(current_user)
+    try:
+        mcp_client = await _create_chat_mcp_client(
+            mcp_server_id="hsa_ledger",
+            db=db,
+            home_id=home_id,
+        )
+        await mcp_client.start()
+    except Exception as exc:
+        return (f"I couldn't connect to your HSA ledger right now: {exc}", [])
+    try:
+        if should_handle_summary and not (has_balance_context and is_details_followup):
+            details_payload = await mcp_client.call_tool(
+                "read_ledger_entries",
+                {"limit": 1000},
+            )
+            details_data = extract_tool_result_payload(details_payload) or {}
+            if not isinstance(details_data, dict):
+                details_data = {}
+            if not details_data.get("success"):
+                error = str(details_data.get("error", "unknown error"))
+                return (
+                    f"I couldn't fetch your HSA summary right now: {error}",
+                    [
+                        {
+                            "server_id": "hsa_ledger",
+                            "tool_name": "read_ledger_entries",
+                            "input": _compact_json({"limit": 1000}),
+                            "output": _compact_json(details_data),
+                        }
+                    ],
+                )
+
+            summary = details_data.get("summary", {})
+            _record_balance_context(session, {"summary": summary, "mode": "summary"})
+            return (
+                _format_hsa_summary_response(summary),
+                [
+                    {
+                        "server_id": "hsa_ledger",
+                        "tool_name": "read_ledger_entries",
+                        "input": _compact_json({"limit": 1000}),
+                        "output": _compact_json(details_data),
+                    }
+                ],
+            )
+
+        if has_balance_context and is_details_followup:
+            details_payload = await mcp_client.call_tool(
+                "read_ledger_entries",
+                {"status_filter": "unreimbursed", "limit": 1000},
+            )
+            details_data = extract_tool_result_payload(details_payload) or {}
+            if not isinstance(details_data, dict):
+                details_data = {}
+            if not details_data.get("success"):
+                error = str(details_data.get("error", "unknown error"))
+                return (
+                    f"I fetched your balance earlier, but couldn't load details right now: {error}",
+                    [
+                        {
+                            "server_id": "hsa_ledger",
+                            "tool_name": "read_ledger_entries",
+                            "input": _compact_json({"status_filter": "unreimbursed", "limit": 1000}),
+                            "output": _compact_json(details_data),
+                        }
+                    ],
+                )
+
+            summary = details_data.get("summary", {})
+            _record_balance_context(session, {"summary": summary, "mode": "details"})
+            return (
+                _format_balance_details_response(summary),
+                [
+                    {
+                        "server_id": "hsa_ledger",
+                        "tool_name": "read_ledger_entries",
+                        "input": _compact_json({"status_filter": "unreimbursed", "limit": 1000}),
+                        "output": _compact_json(details_data),
+                    }
+                ],
+            )
+
+        result = await mcp_client.get_unreimbursed_balance()
+        if "error" in result and "total_unreimbursed" not in result:
+            error = str(result.get("error", "unknown error"))
+            return (
+                f"I couldn't fetch your HSA balance right now: {error}",
+                [
+                    {
+                        "server_id": "hsa_ledger",
+                        "tool_name": "get_unreimbursed_balance",
+                        "input": "{}",
+                        "output": _compact_json(result),
+                    }
+                ],
+            )
+
+        _record_balance_context(session, result)
+        balance = float(result.get("total_unreimbursed", 0) or 0)
+        count = int(result.get("count", 0) or 0)
+        response = (
+            f"Your current unreimbursed HSA balance is **${balance:.2f}** "
+            f"across **{count}** expense(s).\n\n"
+            "If you want, say **show details** for a ledger breakdown."
+        )
+        return (
+            response,
+            [
+                {
+                    "server_id": "hsa_ledger",
+                    "tool_name": "get_unreimbursed_balance",
+                    "input": "{}",
+                    "output": _compact_json(result),
+                }
+            ],
+        )
+    finally:
+        await mcp_client.stop()
+
+
+async def _try_charitable_tool_response(
+    *,
+    message: str,
+    session,
+    current_user: CurrentUserContext,
+    db: Session,
+    enabled_mcp_servers: list[str],
+) -> tuple[str, list[dict[str, str]]] | None:
+    """Handle charitable summary/list requests with deterministic MCP routing."""
+    has_context = _in_recent_charitable_context(session)
+    is_query = _is_charitable_query(message)
+    is_explicit_tool_request = _is_explicit_charitable_tool_request(message)
+    is_orgs_followup = _is_charitable_orgs_followup(message)
+    is_year_only_followup = has_context and _is_year_only_message(message)
+    is_closure = _is_flow_closure(message)
+
+    if has_context and is_closure:
+        session.context.last_intent = None
+        return ("Happy to help. Ask anytime if you want another giving summary.", [])
+
+    should_handle_summary = is_query or is_explicit_tool_request or is_year_only_followup
+    if not should_handle_summary and not (has_context and is_orgs_followup):
+        if has_context:
+            session.context.last_intent = None
+        return None
+
+    # Let the model tool loop handle richer filtered requests (organization, deductible-only, etc.).
+    if should_handle_summary and _has_complex_charitable_filter_request(message):
+        return None
+
+    if "charitable_ledger" not in enabled_mcp_servers:
+        return (
+            "I can do that once your Charitable Ledger MCP server is enabled in settings.",
+            [],
+        )
+
+    include_orgs = is_orgs_followup or is_year_only_followup or bool(
+        re.search(r"\b(organization|organizations|charities|charity|who)\b", message, flags=re.IGNORECASE)
+    )
+    tax_year = _extract_tax_year(message) or (_context_tax_year(session) if has_context else None)
+    home_id = _get_default_home_id(current_user)
+    try:
+        mcp_client = await _create_chat_mcp_client(
+            mcp_server_id="charitable_ledger",
+            db=db,
+            home_id=home_id,
+        )
+        await mcp_client.start()
+    except Exception as exc:
+        return (f"I couldn't connect to your charitable ledger right now: {exc}", [])
+
+    try:
+        arguments = {"tax_year": tax_year} if tax_year else {}
+        result = await mcp_client.call_tool("get_charitable_summary", arguments)
+        summary_data = extract_tool_result_payload(result) or {}
+        if not isinstance(summary_data, dict):
+            summary_data = {}
+        if not summary_data.get("success"):
+            error = str(summary_data.get("error", "unknown error"))
+            return (
+                f"I couldn't fetch your charitable summary right now: {error}",
+                [
+                    {
+                        "server_id": "charitable_ledger",
+                        "tool_name": "get_charitable_summary",
+                        "input": _compact_json(arguments),
+                        "output": _compact_json(summary_data),
+                    }
+                ],
+            )
+
+        _record_charitable_context(session, summary_data)
+        return (
+            _format_charitable_response(summary_data, include_orgs=include_orgs),
+            [
+                {
+                    "server_id": "charitable_ledger",
+                    "tool_name": "get_charitable_summary",
+                    "input": _compact_json(arguments),
+                    "output": _compact_json(summary_data),
+                }
+            ],
+        )
+    finally:
+        await mcp_client.stop()
 
 
 async def _try_addition_tool_response(
@@ -405,9 +1728,11 @@ SUMMARY: <summary>"""
 
 
 @router.get("/models")
-async def list_models():
+async def list_models(
+    _current_user: CurrentUserContext = Depends(get_current_user_context),
+):
     """List available OpenRouter models with provider status."""
-    ollama_status = check_ollama_status()
+    ollama_status = await check_ollama_status()
     
     providers = {
         "OpenAI": {"status": "available"},
@@ -417,7 +1742,8 @@ async def list_models():
     }
     
     models_with_status = []
-    for model in AVAILABLE_MODELS:
+    all_models = await get_available_models()
+    for model in all_models:
         model_info = {
             "id": model["id"],
             "name": model["name"],
@@ -436,18 +1762,22 @@ async def list_models():
 
 
 @router.post("/models/select")
-async def select_model(request: ModelSelectRequest):
+async def select_model(
+    request: ModelSelectRequest,
+    _current_user: CurrentUserContext = Depends(get_current_user_context),
+):
     """Change the active model (in-memory)."""
-    ollama_status = check_ollama_status()
+    ollama_status = await check_ollama_status()
     
-    valid_ids = [m["id"] for m in AVAILABLE_MODELS]
+    all_models = await get_available_models()
+    valid_ids = [m["id"] for m in all_models]
     if request.model_id not in valid_ids:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid model ID. Available: {valid_ids}"
         )
     
-    model = next((m for m in AVAILABLE_MODELS if m["id"] == request.model_id), None)
+    model = next((m for m in all_models if m["id"] == request.model_id), None)
     if model and model["provider"] == "Ollama" and not ollama_status.get("available", False):
         raise HTTPException(
             status_code=503,
@@ -459,7 +1789,9 @@ async def select_model(request: ModelSelectRequest):
 
 
 @router.post("/sessions")
-async def create_session():
+async def create_session(
+    _current_user: CurrentUserContext = Depends(get_current_user_context),
+):
     """Create a new chat session."""
     session = session_manager.create_session()
     return JSONResponse({
@@ -470,7 +1802,10 @@ async def create_session():
 
 
 @router.delete("/sessions/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(
+    session_id: str,
+    _current_user: CurrentUserContext = Depends(get_current_user_context),
+):
     """Delete a chat session."""
     if session_manager.delete_session(session_id):
         return JSONResponse({
@@ -481,7 +1816,10 @@ async def delete_session(session_id: str):
 
 
 @router.get("/sessions/{session_id}")
-async def get_session(session_id: str):
+async def get_session(
+    session_id: str,
+    _current_user: CurrentUserContext = Depends(get_current_user_context),
+):
     """Get session info."""
     session = session_manager.get_session(session_id)
     if not session:
@@ -498,7 +1836,11 @@ async def get_session(session_id: str):
 
 
 @router.post("/message", response_model=ChatResponse)
-async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
+async def chat_message(
+    request: ChatRequest,
+    current_user: CurrentUserContext = Depends(get_current_user_context),
+    db: Session = Depends(get_db),
+):
     """HTTP endpoint for chat messages using OpenRouter."""
     chat_repo = ChatRepository(db)
     message_repo = ChatMessageRepository(db)
@@ -509,8 +1851,14 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
         db_chat = chat_repo.get(request.chat_id)
         if not db_chat:
             raise HTTPException(status_code=404, detail="Chat not found")
+        if db_chat.user_id != current_user.user.id:
+            raise HTTPException(status_code=404, detail="Chat not found")
     else:
-        db_chat = chat_repo.create(title="New Chat", model=get_selected_model())
+        db_chat = chat_repo.create(
+            user_id=current_user.user.id,
+            title="New Chat",
+            model=get_selected_model(),
+        )
 
     # Get or create session (in-memory)
     if request.session_id:
@@ -520,15 +1868,24 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
     else:
         session = session_manager.create_session()
 
-    session.context.web_search_enabled = bool(request.web_search_enabled)
-    session.context.enabled_mcp_servers = normalize_enabled_server_ids(
-        request.enabled_mcp_servers,
-        settings,
+    effective_enabled_servers = _resolve_enabled_mcp_servers_for_chat(
+        requested_ids=request.enabled_mcp_servers,
+        current_user=current_user,
+        db=db,
     )
+    session.context.web_search_enabled = bool(request.web_search_enabled)
+    session.context.enabled_mcp_servers = effective_enabled_servers
+    attachment_metadata = [attachment.model_dump() for attachment in request.attachments]
+    user_metadata = {"attachments": attachment_metadata} if attachment_metadata else None
 
     # Store user message in PostgreSQL if chat exists
     if db_chat:
-        message_repo.create(chat_id=db_chat.id, role="user", content=request.message)
+        message_repo.create(
+            chat_id=db_chat.id,
+            role="user",
+            content=request.message,
+            metadata=user_metadata,
+        )
         # Set an immediate first-pass title from the first user message.
         if (db_chat.title or "").strip().lower() == "new chat":
             try:
@@ -542,67 +1899,136 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
 
     # Store user message in session (in-memory)
     session.context.web_search_enabled = bool(request.web_search_enabled)
-    session.context.enabled_mcp_servers = normalize_enabled_server_ids(
-        request.enabled_mcp_servers,
-        settings,
+    session.context.enabled_mcp_servers = effective_enabled_servers
+    session.add_message(role="user", content=request.message, metadata=user_metadata)
+    logger.warning(
+        "chat.message session_id=%s chat_id=%s enabled_mcp_servers=%s message=%s",
+        session.session_id,
+        db_chat.id if db_chat else None,
+        session.context.enabled_mcp_servers,
+        request.message[:140].replace("\n", " "),
     )
-    session.add_message(role="user", content=request.message)
 
     # Convert session messages to OpenRouter format; prepend system prompt so model stays in character
-    messages = [
-        {
-            "role": "system",
-            "content": VivianPersonality.get_system_prompt(
-                current_date=datetime.now(timezone.utc).date().isoformat(),
-                user_location=settings.user_location or None,
-                enabled_mcp_servers=session.context.enabled_mcp_servers,
-            ),
-        },
-        *(
-            {"role": msg["role"], "content": msg["content"]}
-            for msg in session.messages
-        ),
-    ]
-
-    tools_called: list[dict[str, str]] = []
-    tool_response = await _try_addition_tool_response(
-        message=request.message,
+    # and sanitize user-controlled content before any LLM request.
+    messages = _build_llm_messages_for_session(
+        session=session,
         enabled_mcp_servers=session.context.enabled_mcp_servers,
     )
-    if tool_response:
-        response_text, tools_called = tool_response
+
+    tools_called: list[dict[str, str]] = []
+    document_workflows: list[DocumentWorkflowArtifact] = []
+    if request.attachments:
+        workflow_result = await execute_document_workflows(
+            attachments=request.attachments,
+            enabled_mcp_servers=session.context.enabled_mcp_servers,
+            settings=settings,
+        )
+        response_text = workflow_result.response_text
+        tools_called = workflow_result.tools_called
+        document_workflows = workflow_result.artifacts
     else:
-        # Get response from OpenRouter
-        # Use request's web_search_enabled setting (default False to avoid unexpected costs)
-        try:
-            response_text = await get_chat_completion(messages, web_search_enabled=request.web_search_enabled)
-        except OpenRouterCreditsError as e:
-            # Handle model not found (404) errors vs insufficient credits (402) errors
-            if "Model error" in e.message:
-                return JSONResponse(
-                    status_code=404,
-                    content={"error": "model_not_found", "message": e.message},
+        tool_response = await _try_dual_summary_tool_response(
+            message=request.message,
+            session=session,
+            current_user=current_user,
+            db=db,
+            enabled_mcp_servers=session.context.enabled_mcp_servers,
+        )
+        if not tool_response:
+            tool_response = await _try_balance_tool_response(
+                message=request.message,
+                session=session,
+                current_user=current_user,
+                db=db,
+                enabled_mcp_servers=session.context.enabled_mcp_servers,
+            )
+        if not tool_response:
+            tool_response = await _try_charitable_tool_response(
+                message=request.message,
+                session=session,
+                current_user=current_user,
+                db=db,
+                enabled_mcp_servers=session.context.enabled_mcp_servers,
+            )
+        if not tool_response:
+            tool_response = await _try_addition_tool_response(
+                message=request.message,
+                enabled_mcp_servers=session.context.enabled_mcp_servers,
+            )
+        if tool_response:
+            response_text, tools_called = tool_response
+            logger.warning(
+                "chat.message used deterministic tool routing session_id=%s tools_called=%s",
+                session.session_id,
+                [tool.get("tool_name") for tool in tools_called],
+            )
+        else:
+            try:
+                response_text, tools_called = await _run_model_tool_loop(
+                    base_messages=messages,
+                    web_search_enabled=request.web_search_enabled,
+                    session=session,
+                    current_user=current_user,
+                    db=db,
+                    enabled_mcp_servers=session.context.enabled_mcp_servers,
                 )
-            return JSONResponse(
-                status_code=402,
-                content={"error": "insufficient_credits", "message": e.message},
-            )
-        except OpenRouterRateLimitError as e:
-            return JSONResponse(
-                status_code=429,
-                content={"error": "rate_limit", "message": e.message},
-            )
-        except Exception as e:
-            print(f"Error getting chat completion: {e}")
-            import traceback
-            traceback.print_exc()
-            return JSONResponse(
-                status_code=500,
-                content={"error": "server_error", "message": str(e)},
-            )
+            except ModelToolCallingUnsupportedError as e:
+                logger.warning(
+                    "chat.message model_tool_loop_unsupported model=%s error=%s",
+                    get_selected_model(),
+                    e.message,
+                )
+                response_text = await get_chat_completion(
+                    messages,
+                    web_search_enabled=request.web_search_enabled,
+                )
+            except OpenRouterCreditsError as e:
+                # Handle model not found (404) errors vs insufficient credits (402) errors
+                if "Model error" in e.message:
+                    return JSONResponse(
+                        status_code=404,
+                        content={"error": "model_not_found", "message": e.message},
+                    )
+                return JSONResponse(
+                    status_code=402,
+                    content={"error": "insufficient_credits", "message": e.message},
+                )
+            except OpenRouterRateLimitError as e:
+                return JSONResponse(
+                    status_code=429,
+                    content={"error": "rate_limit", "message": e.message},
+                )
+            except OllamaTimeoutError as e:
+                print(f"Ollama timeout: {e}")
+                return JSONResponse(
+                    status_code=504,
+                    content={"error": "ollama_timeout", "message": str(e)},
+                )
+            except OllamaConnectionError as e:
+                print(f"Ollama connection error: {e}")
+                return JSONResponse(
+                    status_code=502,
+                    content={"error": "ollama_unavailable", "message": str(e)},
+                )
+            except Exception as e:
+                print(f"Error getting chat completion: {e}")
+                import traceback
+                traceback.print_exc()
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": "server_error", "message": str(e) or "An unexpected error occurred."},
+                )
 
     # Store assistant response in PostgreSQL if chat exists
-    assistant_metadata = {"tools_called": tools_called} if tools_called else None
+    assistant_metadata_payload: dict[str, object] = {}
+    if tools_called:
+        assistant_metadata_payload["tools_called"] = tools_called
+    if document_workflows:
+        assistant_metadata_payload["document_workflows"] = [
+            workflow.model_dump(mode="json") for workflow in document_workflows
+        ]
+    assistant_metadata = assistant_metadata_payload or None
     if db_chat:
         message_repo.create(
             chat_id=db_chat.id,
@@ -628,11 +2054,26 @@ async def chat_message(request: ChatRequest, db: Session = Depends(get_db)):
     # Store assistant response in session (in-memory)
     session.add_message(role="assistant", content=response_text, metadata=assistant_metadata)
 
+    # Check for pending follow-up questions
+    follow_up_question = session.context.pending_follow_up
+    follow_up_questions = session.context.pending_follow_ups
+
+    if follow_up_question:
+        # Clear singular from context (one-time use)
+        session.context.pending_follow_up = None
+
+    if follow_up_questions:
+        # Clear array from context (one-time use)
+        session.context.pending_follow_ups = []
+
     return ChatResponse(
         response=response_text,
         session_id=session.session_id,
         chat_id=db_chat.id,
         tools_called=tools_called,
+        document_workflows=document_workflows,
+        follow_up_question=follow_up_question,
+        follow_up_questions=follow_up_questions,
     )
 
 
