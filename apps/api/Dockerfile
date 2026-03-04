@@ -19,7 +19,7 @@ RUN pip install -e /mcp-servers/test-mcp-server
 
 # Copy and install API
 COPY apps/api /app
-RUN pip install -e .
+RUN pip install -e ".[dev]"
 
 # Copy entrypoint script
 COPY apps/api/entrypoint.sh /entrypoint.sh

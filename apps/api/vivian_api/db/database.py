@@ -21,6 +21,11 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 class Base(DeclarativeBase):
     """Base class for all ORM models."""
 
+    def __repr__(self) -> str:
+        cols = {c.key: getattr(self, c.key) for c in self.__mapper__.column_attrs}
+        attrs = ", ".join(f"{k}={v!r}" for k, v in cols.items())
+        return f"<{self.__class__.__name__} {attrs}>"
+
 
 def get_db() -> Generator[Session, None, None]:
     """Yield a database session for FastAPI dependency injection."""

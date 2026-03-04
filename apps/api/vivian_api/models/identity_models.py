@@ -92,6 +92,13 @@ class User(Base):
         back_populates="client",
         cascade="all, delete-orphan",
     )
+    homes: Mapped[list["Home"]] = relationship(
+        "Home",
+        secondary="home_memberships",
+        primaryjoin="User.id == HomeMembership.client_id",
+        secondaryjoin="HomeMembership.home_id == Home.id",
+        viewonly=True,
+    )
     auth_sessions: Mapped[list["AuthSession"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",

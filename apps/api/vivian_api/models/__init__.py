@@ -1,7 +1,7 @@
 """ORM models exported for metadata registration and shared imports."""
 
 from vivian_api.models.chat_models import Chat, ChatMessage
-from vivian_api.models.connection_models import HomeConnection, McpServerSettings
+from vivian_api.models.connection_models import HomeConnection, HomeLinkSetting, McpServerSettings
 from vivian_api.models.identity_models import AuthSession, Client, Home, HomeMembership, User
 
 __all__ = [
@@ -13,5 +13,6 @@ __all__ = [
     "HomeMembership",
     "AuthSession",
     "HomeConnection",
+    "HomeLinkSetting",
     "McpServerSettings",
 ]
