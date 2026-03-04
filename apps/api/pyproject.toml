@@ -24,8 +24,6 @@ test = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
 ]
-
-[project.optional-dependencies]
 dev = [
     "ipython>=8.0.0",
 ]
