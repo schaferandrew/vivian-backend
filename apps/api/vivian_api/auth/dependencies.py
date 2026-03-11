@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -12,7 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 from vivian_api.auth.security import TokenExpiredError, TokenInvalidError, decode_access_token
 from vivian_api.config import Settings
 from vivian_api.db.database import get_db
-from vivian_api.models.identity_models import HomeMembership, User
+from vivian_api.models.identity_models import HomeApiKey, HomeMembership, User
 
 
 @dataclass(slots=True)
@@ -81,6 +82,36 @@ def get_current_user_context(
         memberships=memberships,
         default_membership=default_membership,
     )
+
+
+@dataclass(slots=True)
+class ApiKeyContext:
+    home_id: str
+    key_record: HomeApiKey
+
+
+def get_home_from_api_key(
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    db: Session = Depends(get_db),
+) -> ApiKeyContext:
+    """Validate a home API key (viv_sk_...) and return its home context.
+
+    Updates last_used_at on every successful validation.
+    """
+    from vivian_api.repositories.api_key_repository import ApiKeyRepository
+
+    token = _extract_bearer_token(authorization)
+    if not token.startswith("viv_sk_"):
+        raise _unauthorized("Invalid API key format")
+
+    key_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    repo = ApiKeyRepository(db)
+    key_record = repo.get_by_hash(key_hash)
+    if not key_record:
+        raise HTTPException(status_code=401, detail="invalid_api_key")
+
+    repo.update_last_used(key_record)
+    return ApiKeyContext(home_id=str(key_record.home_id), key_record=key_record)
 
 
 def require_roles(*roles: str):

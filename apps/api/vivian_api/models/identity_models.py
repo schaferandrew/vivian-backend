@@ -58,6 +58,10 @@ class Home(Base):
         back_populates="home",
         cascade="all, delete-orphan",
     )
+    api_keys: Mapped[list["HomeApiKey"]] = relationship(
+        back_populates="home",
+        cascade="all, delete-orphan",
+    )
 
 
 class User(Base):
@@ -194,3 +198,33 @@ class AuthSession(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="auth_sessions")
+
+
+class HomeApiKey(Base):
+    """Named API key scoped to a home, used by the MCP server and other integrations."""
+
+    __tablename__ = "home_api_keys"
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    home_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("homes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    key_prefix: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey("users.id"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    home: Mapped["Home"] = relationship("Home", back_populates="api_keys")
+    creator: Mapped["User | None"] = relationship("User", foreign_keys=[created_by])
