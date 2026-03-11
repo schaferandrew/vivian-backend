@@ -170,6 +170,11 @@ For new `vivian-backend` worktrees, ensure `.env` exists before running Docker o
 
 **Always ask the user for approval before committing or opening a PR.** Do not commit or push without explicit approval.
 
+Before committing, check the current branch:
+- If on `main` (or `master`): pull latest (`git pull`) then create a new feature branch. Never commit directly to main.
+- If on a feature branch whose name doesn't match the current task: ask the user which branch to use before proceeding.
+- Do not reuse an existing feature branch for unrelated work.
+
 ---
 
 ## Link Settings API
