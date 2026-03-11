@@ -73,6 +73,22 @@ def hash_refresh_token(refresh_token: str) -> str:
     return hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
 
 
+def generate_api_key() -> tuple[str, str, str]:
+    """Generate a new API key.
+
+    Returns:
+        (full_key, sha256_hash, prefix)
+        - full_key: the key to return to the user once (e.g. "viv_sk_<32 chars>")
+        - sha256_hash: stored in DB for lookup
+        - prefix: display-safe prefix shown in key list (e.g. "viv_sk_abcd1234")
+    """
+    random_part = secrets.token_urlsafe(32)[:32]
+    full_key = f"viv_sk_{random_part}"
+    key_hash = hashlib.sha256(full_key.encode("utf-8")).hexdigest()
+    prefix = f"viv_sk_{random_part[:8]}"
+    return full_key, key_hash, prefix
+
+
 def generate_refresh_token() -> str:
     return secrets.token_urlsafe(64)
 

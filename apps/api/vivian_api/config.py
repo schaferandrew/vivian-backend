@@ -154,6 +154,9 @@ class Settings(BaseSettings):
     google_oauth_error_redirect: str = "http://localhost:3000/settings?google=error"
     # Note: token store path is now deprecated; tokens stored in DB
     google_oauth_token_store_path: str = "/tmp/vivian-uploads/google-oauth.json"
+
+    # Vivian client URL (used in internal API error responses)
+    vivian_url: str = "http://localhost:3000"
     class Config:
         env_file = ".env"
         env_prefix = "VIVIAN_API_"

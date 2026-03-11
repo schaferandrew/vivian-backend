@@ -207,7 +207,7 @@ async def get_google_status(
 @router.get("/google/oauth/start")
 async def start_google_oauth(
     return_to: str = Query(default="", description="Where to send user after OAuth"),
-    current_user: CurrentUserContext = Depends(require_roles("owner", "parent")),
+    current_user: CurrentUserContext = Depends(require_roles("owner")),
 ):
     """Start Google OAuth flow and redirect to consent screen."""
     client_id = get_google_client_id(settings)
