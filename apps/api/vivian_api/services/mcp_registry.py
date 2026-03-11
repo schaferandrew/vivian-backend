@@ -105,11 +105,7 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
             ],
             source="builtin",
             requires_connection="google",
-            required_settings=[
-                {"key": "drive_reimbursed_folder_id", "label": "Reimbursed Folder ID", "type": "folder_id"},
-                {"key": "drive_unreimbursed_folder_id", "label": "Unreimbursed Folder ID", "type": "folder_id"},
-                {"key": "spreadsheet_id", "label": "Spreadsheet ID", "type": "spreadsheet_id"},
-            ],
+            required_settings=[],  # Drive config self-bootstraps via .config sheet
         ),
         "charitable_ledger": MCPServerDefinition(
             id="charitable_ledger",
@@ -128,10 +124,7 @@ def get_mcp_server_definitions(settings: Settings) -> dict[str, MCPServerDefinit
             ],
             source="builtin",
             requires_connection="google",
-            required_settings=[
-                {"key": "drive_folder_id", "label": "Drive Folder ID", "type": "folder_id"},
-                {"key": "spreadsheet_id", "label": "Spreadsheet ID", "type": "spreadsheet_id"},
-            ],
+            required_settings=[],  # Drive config self-bootstraps via .config sheet
         ),
         "test_addition": MCPServerDefinition(
             id="test_addition",
