@@ -16,8 +16,12 @@ from vivian_api.auth.dependencies import (
 from vivian_api.config import Settings
 from vivian_api.db.database import get_db
 from vivian_api.models.schemas import UnreimbursedBalanceResponse
-from vivian_api.services.mcp_client import MCPClient, extract_tool_result_payload
-from vivian_api.services.mcp_registry import get_mcp_server_definitions
+from vivian_api.services.drive_config import get_or_create_config
+from vivian_api.services.google_sheets import (
+    build_google_credentials,
+    get_sheets_service,
+    read_rows,
+)
 
 
 router = APIRouter(
@@ -74,26 +78,64 @@ def _get_default_home_id(current_user: CurrentUserContext) -> str:
     return current_user.default_membership.home_id
 
 
-async def _create_mcp_client(
-    mcp_server_id: str,
-    db: Session,
-    home_id: str,
-) -> MCPClient:
-    """Create an MCPClient with database-backed configuration."""
-    definitions = get_mcp_server_definitions(settings)
-    definition = definitions.get(mcp_server_id)
-    if not definition:
-        raise ValueError(f"Unknown MCP server: {mcp_server_id}")
+# ---------------------------------------------------------------------------
+# Row parsers
+# ---------------------------------------------------------------------------
 
-    from vivian_api.services.google_integration import build_mcp_env_from_db
-    env = await build_mcp_env_from_db(home_id, mcp_server_id, db, settings)
-    return MCPClient(
-        server_command=definition.command,
-        process_env=env,
-        server_path_override=definition.server_path,
-        mcp_server_id=mcp_server_id,
-    )
+def _pad(row: list, length: int) -> list[str]:
+    row = list(row)
+    while len(row) < length:
+        row.append("")
+    return [str(v) for v in row]
 
+
+def _to_float(val: str) -> float:
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _row_to_hsa_entry(row: list) -> dict:
+    r = _pad(row, 11)
+    return {
+        "id": r[0],
+        "provider": r[1],
+        "service_date": r[2],
+        "paid_date": r[3],
+        "amount": _to_float(r[4]),
+        "hsa_eligible": r[5],
+        "status": r[6],
+        "reimbursement_date": r[7],
+        "drive_file_id": r[8],
+        "confidence": r[9],
+        "created_at": r[10],
+    }
+
+
+def _row_to_donation_entry(row: list) -> dict:
+    r = _pad(row, 10)
+    return {
+        "id": r[0],
+        "organization_name": r[1],
+        "donation_date": r[2],
+        "amount": _to_float(r[3]),
+        "tax_deductible": r[4],
+        "description": r[5],
+        "drive_file_id": r[6],
+        "tax_year": r[7],
+        "confidence": r[8],
+        "created_at": r[9],
+    }
+
+
+def _year_matches(date_str: str, year: int) -> bool:
+    return date_str.startswith(str(year))
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 
 @router.get("/balance/unreimbursed", response_model=UnreimbursedBalanceResponse)
 async def get_unreimbursed_balance(
@@ -101,144 +143,112 @@ async def get_unreimbursed_balance(
     db: Session = Depends(get_db),
 ):
     """Get total of all unreimbursed HSA expenses.
-    
-    Returns zero balance if MCP server is not configured or fails.
+
+    Returns zero balance if Google is not connected or the ledger is empty.
     """
     home_id = _get_default_home_id(current_user)
-    
+
     try:
-        mcp_client = await _create_mcp_client("hsa_ledger", db, home_id)
-        await mcp_client.start()
-        
-        try:
-            result = await mcp_client.get_unreimbursed_balance()
-            
-            if "error" in result and not result.get("total_unreimbursed"):
-                # MCP server responded with an error (likely spreadsheet not found)
-                logger.error("HSA balance MCP error: %s", result)
-                return UnreimbursedBalanceResponse(
-                    total_amount=0,
-                    count=0,
-                    is_configured=False
-                )
-            
-            return UnreimbursedBalanceResponse(
-                total_amount=result.get("total_unreimbursed", 0),
-                count=result.get("count", 0),
-                is_configured=True
-            )
-        finally:
-            await mcp_client.stop()
-            
+        cfg = await get_or_create_config(home_id, db, settings)
+        creds = build_google_credentials(home_id, db, settings)
+        sheets_svc = get_sheets_service(creds)
+
+        rows = read_rows(sheets_svc, cfg["hsa_ledger_id"], "Sheet1")
+        unreimbursed = [
+            _row_to_hsa_entry(r) for r in rows
+            if len(r) > 6 and r[6] == "unreimbursed"
+        ]
+        return UnreimbursedBalanceResponse(
+            total_amount=sum(e["amount"] for e in unreimbursed),
+            count=len(unreimbursed),
+            is_configured=True,
+        )
+
     except Exception as e:
-        # If MCP server isn't configured or fails to start, return not configured
         logger.error("HSA balance check failed: %s", e, exc_info=True)
         return UnreimbursedBalanceResponse(
             total_amount=0,
             count=0,
-            is_configured=False
+            is_configured=False,
         )
 
 
 @router.get("/summary", response_model=LedgerSummaryResponse)
 async def get_ledger_summary(
     year: Optional[int] = Query(None, description="Filter by year (e.g., 2025)"),
-    status_filter: Optional[str] = Query(None, description="Filter by status", enum=["reimbursed", "unreimbursed", "not_hsa_eligible"]),
+    status_filter: Optional[str] = Query(
+        None,
+        description="Filter by status",
+        enum=["reimbursed", "unreimbursed", "not_hsa_eligible"],
+    ),
     limit: int = Query(1000, description="Maximum entries to return", ge=1, le=5000),
     current_user: CurrentUserContext = Depends(get_current_user_context),
     db: Session = Depends(get_db),
 ):
-    """Get HSA ledger summary with optional filtering.
-    
-    This endpoint answers questions like:
-    - "How much have I reimbursed this year?"
-    - "How much is available to reimburse?"
-    - "What are my total HSA expenses?"
-    
-    Args:
-        year: Optional year to filter entries
-        status_filter: Optional status filter (reimbursed, unreimbursed, not_hsa_eligible)
-        limit: Maximum number of entries to return (default 1000)
-    """
+    """Get HSA ledger summary with optional filtering."""
     home_id = _get_default_home_id(current_user)
-    
-    mcp_client = await _create_mcp_client("hsa_ledger", db, home_id)
-    await mcp_client.start()
-    
+
+    _empty_summary = LedgerSummary(
+        total_entries=0,
+        total_amount=0,
+        total_reimbursed=0,
+        total_unreimbursed=0,
+        total_not_eligible=0,
+        count_reimbursed=0,
+        count_unreimbursed=0,
+        count_not_eligible=0,
+        available_to_reimburse=0,
+    )
+
     try:
-        result = await mcp_client.call_tool(
-            "read_ledger_entries",
-            {
-                "year": year,
-                "status_filter": status_filter,
-                "limit": limit
-            }
-        )
-        
-        # Parse the result
-        data = extract_tool_result_payload(result) or {}
-        if not isinstance(data, dict):
-            data = {}
-        
-        if not data.get("success"):
-            return LedgerSummaryResponse(
-                success=False,
-                year=year,
-                status_filter=status_filter,
-                summary=LedgerSummary(
-                    total_entries=0,
-                    total_amount=0,
-                    total_reimbursed=0,
-                    total_unreimbursed=0,
-                    total_not_eligible=0,
-                    count_reimbursed=0,
-                    count_unreimbursed=0,
-                    count_not_eligible=0,
-                    available_to_reimburse=0,
-                ),
-                error=data.get("error", "Failed to read ledger")
-            )
-        
-        summary_data = data.get("summary", {})
-        
+        cfg = await get_or_create_config(home_id, db, settings)
+        creds = build_google_credentials(home_id, db, settings)
+        sheets_svc = get_sheets_service(creds)
+
+        rows = read_rows(sheets_svc, cfg["hsa_ledger_id"], "Sheet1")
+        entries = [_row_to_hsa_entry(r) for r in rows]
+
+        if year:
+            entries = [
+                e for e in entries
+                if _year_matches(e["service_date"], year) or _year_matches(e["paid_date"], year)
+            ]
+        if status_filter:
+            entries = [e for e in entries if e["status"] == status_filter]
+
+        entries = entries[:limit]
+
+        total_reimbursed = sum(e["amount"] for e in entries if e["status"] == "reimbursed")
+        total_unreimbursed = sum(e["amount"] for e in entries if e["status"] == "unreimbursed")
+        total_not_eligible = sum(e["amount"] for e in entries if e["status"] == "not_hsa_eligible")
+
         return LedgerSummaryResponse(
             success=True,
             year=year,
             status_filter=status_filter,
             summary=LedgerSummary(
-                total_entries=summary_data.get("total_entries", 0),
-                total_amount=summary_data.get("total_amount", 0),
-                total_reimbursed=summary_data.get("total_reimbursed", 0),
-                total_unreimbursed=summary_data.get("total_unreimbursed", 0),
-                total_not_eligible=summary_data.get("total_not_eligible", 0),
-                count_reimbursed=summary_data.get("count_reimbursed", 0),
-                count_unreimbursed=summary_data.get("count_unreimbursed", 0),
-                count_not_eligible=summary_data.get("count_not_eligible", 0),
-                available_to_reimburse=summary_data.get("available_to_reimburse", 0),
+                total_entries=len(entries),
+                total_amount=sum(e["amount"] for e in entries),
+                total_reimbursed=total_reimbursed,
+                total_unreimbursed=total_unreimbursed,
+                total_not_eligible=total_not_eligible,
+                count_reimbursed=sum(1 for e in entries if e["status"] == "reimbursed"),
+                count_unreimbursed=sum(1 for e in entries if e["status"] == "unreimbursed"),
+                count_not_eligible=sum(1 for e in entries if e["status"] == "not_hsa_eligible"),
+                available_to_reimburse=total_unreimbursed,
             ),
-            entries=data.get("entries", [])
+            entries=entries,
         )
-        
+
     except Exception as e:
+        logger.error("Ledger summary failed: %s", e, exc_info=True)
         return LedgerSummaryResponse(
             success=False,
             year=year,
             status_filter=status_filter,
-            summary=LedgerSummary(
-                total_entries=0,
-                total_amount=0,
-                total_reimbursed=0,
-                total_unreimbursed=0,
-                total_not_eligible=0,
-                count_reimbursed=0,
-                count_unreimbursed=0,
-                count_not_eligible=0,
-                available_to_reimburse=0,
-            ),
-            error=f"Failed to get ledger summary: {str(e)}"
+            summary=_empty_summary,
+            error=f"Failed to get ledger summary: {e}",
         )
-    finally:
-        await mcp_client.stop()
 
 
 @router.get("/charitable/summary", response_model=CharitableSummaryResponse)
@@ -247,51 +257,46 @@ async def get_charitable_summary(
     current_user: CurrentUserContext = Depends(get_current_user_context),
     db: Session = Depends(get_db),
 ):
-    """Get summary of charitable donations by tax year.
-    
-    Args:
-        tax_year: Optional tax year to filter by (e.g., "2025")
-    """
+    """Get summary of charitable donations by tax year."""
     home_id = _get_default_home_id(current_user)
-    
-    mcp_client = await _create_mcp_client("charitable_ledger", db, home_id)
-    await mcp_client.start()
-    
+
     try:
-        payload: dict[str, str] = {}
+        cfg = await get_or_create_config(home_id, db, settings)
+        creds = build_google_credentials(home_id, db, settings)
+        sheets_svc = get_sheets_service(creds)
+
+        rows = read_rows(sheets_svc, cfg["donations_ledger_id"], "Sheet1")
+        entries = [_row_to_donation_entry(r) for r in rows]
+
         if tax_year:
-            payload["tax_year"] = tax_year
-        result = await mcp_client.call_tool(
-            "get_charitable_summary",
-            payload
+            entries = [e for e in entries if e["tax_year"] == tax_year]
+
+        total = sum(e["amount"] for e in entries)
+        tax_deductible_total = sum(
+            e["amount"] for e in entries if e["tax_deductible"].lower() == "true"
         )
-        
-        # Parse the result
-        data = extract_tool_result_payload(result) or {}
-        if not isinstance(data, dict):
-            data = {}
-        
-        if not data.get("success"):
-            return CharitableSummaryResponse(
-                success=False,
-                error=data.get("error", "Failed to get summary")
-            )
-        
+        by_organization: dict[str, float] = {}
+        by_year: dict[str, float] = {}
+        for e in entries:
+            org = e["organization_name"]
+            yr = e["tax_year"]
+            by_organization[org] = by_organization.get(org, 0.0) + e["amount"]
+            by_year[yr] = by_year.get(yr, 0.0) + e["amount"]
+
         return CharitableSummaryResponse(
             success=True,
             data=CharitableDonationSummary(
                 tax_year=tax_year,
-                total=data.get("total", 0),
-                tax_deductible_total=data.get("tax_deductible_total", 0),
-                by_organization=data.get("by_organization", {}),
-                by_year=data.get("by_year", {}),
-            )
+                total=total,
+                tax_deductible_total=tax_deductible_total,
+                by_organization=by_organization,
+                by_year=by_year,
+            ),
         )
-        
+
     except Exception as e:
+        logger.error("Charitable summary failed: %s", e, exc_info=True)
         return CharitableSummaryResponse(
             success=False,
-            error=f"Failed to get charitable summary: {str(e)}"
+            error=f"Failed to get charitable summary: {e}",
         )
-    finally:
-        await mcp_client.stop()
